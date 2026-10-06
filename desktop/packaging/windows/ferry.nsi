@@ -30,9 +30,15 @@ VIAddVersionKey "FileDescription" "Ferry - share files and clipboard with your p
 VIAddVersionKey "ProductVersion" "${VERSION}"
 VIAddVersionKey "FileVersion" "${VERSION}"
 VIAddVersionKey "LegalCopyright" "MIT License"
+VIAddVersionKey "CompanyName" "Ferry (open source)"
+VIAddVersionKey "Comments" "Installs Ferry for the current user"
 
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
+!include "StrFunc.nsh"
+!include "WinMessages.nsh"
+${StrStr}
+${UnStrRep}
 
 !define MUI_ICON "ferry.ico"
 !define MUI_UNICON "ferry.ico"
@@ -72,9 +78,24 @@ Section "Ferry" SecMain
   CreateShortcut "$SENDTO\Phone (Ferry).lnk" "$INSTDIR\ferryd.exe" "send" "$INSTDIR\ferry.ico" 0
   CreateShortcut "$SENDTO\Ferry (choose device).lnk" "$INSTDIR\ferryd.exe" "send --choose" "$INSTDIR\ferry.ico" 0
 
-  ; "ferry" command for terminals (user PATH)
-  nsExec::Exec `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$d='$INSTDIR'; $$p=[Environment]::GetEnvironmentVariable('Path','User'); if(-not $$p){$$p=''}; if(($$p -split ';') -notcontains $$d){[Environment]::SetEnvironmentVariable('Path',($$p.TrimEnd(';')+';'+$$d).TrimStart(';'),'User')}"`
-  Pop $0
+  ; "ferry" command for terminals: add to the user PATH (plain registry, no scripts).
+  ; Skipped if PATH is very long, so NSIS's string limit can never truncate it.
+  ReadRegStr $0 HKCU "Environment" "Path"
+  StrLen $2 "$0"
+  ${StrStr} $1 "$0" "$INSTDIR"
+  ${If} $1 == ""
+    ${If} $2 > 900
+      DetailPrint "PATH is long - not changed. Add $INSTDIR yourself to use 'ferry' in a terminal."
+    ${Else}
+      ${If} $0 == ""
+        StrCpy $0 "$INSTDIR"
+      ${Else}
+        StrCpy $0 "$0;$INSTDIR"
+      ${EndIf}
+      WriteRegExpandStr HKCU "Environment" "Path" "$0"
+      SendMessage ${HWND_BROADCAST} ${WM_SETTINGCHANGE} 0 "STR:Environment" /TIMEOUT=500
+    ${EndIf}
+  ${EndIf}
 
   ; Settings > Apps entry
   WriteRegStr HKCU "${UNINST_KEY}" "DisplayName" "Ferry"
@@ -118,8 +139,17 @@ Section "Uninstall"
   DeleteRegValue HKCU "${RUN_KEY}" "Ferry"
   DeleteRegKey HKCU "${UNINST_KEY}"
 
-  nsExec::Exec `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$d='$INSTDIR'; $$p=[Environment]::GetEnvironmentVariable('Path','User'); if($$p){[Environment]::SetEnvironmentVariable('Path',((($$p -split ';') | Where-Object { $$_ -and $$_ -ne $$d }) -join ';'),'User')}"`
-  Pop $0
+  ; remove from the user PATH
+  ReadRegStr $0 HKCU "Environment" "Path"
+  StrLen $2 "$0"
+  ${If} $2 <= 900
+  ${AndIf} $0 != ""
+    ${UnStrRep} $0 "$0" ";$INSTDIR" ""
+    ${UnStrRep} $0 "$0" "$INSTDIR;" ""
+    ${UnStrRep} $0 "$0" "$INSTDIR" ""
+    WriteRegExpandStr HKCU "Environment" "Path" "$0"
+    SendMessage ${HWND_BROADCAST} ${WM_SETTINGCHANGE} 0 "STR:Environment" /TIMEOUT=500
+  ${EndIf}
 
   nsExec::Exec 'netsh advfirewall firewall show rule name="Ferry"'
   Pop $0

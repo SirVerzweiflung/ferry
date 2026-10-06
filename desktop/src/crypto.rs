@@ -20,24 +20,15 @@ pub fn random_bytes(buf: &mut [u8]) {
 
 #[cfg(win)]
 pub fn random_bytes(buf: &mut [u8]) {
-    use std::ffi::c_void;
-    #[link(name = "kernel32")]
+    #[link(name = "bcrypt")]
     extern "system" {
-        fn LoadLibraryA(name: *const u8) -> isize;
-        fn GetProcAddress(module: isize, name: *const u8) -> *const c_void;
+        // NTSTATUS BCryptGenRandom(BCRYPT_ALG_HANDLE, PUCHAR, ULONG, ULONG)
+        fn BCryptGenRandom(alg: isize, buf: *mut u8, len: u32, flags: u32) -> i32;
     }
-    // NTSTATUS BCryptGenRandom(BCRYPT_ALG_HANDLE, PUCHAR, ULONG, ULONG)
-    type GenRandom = unsafe extern "system" fn(alg: isize, buf: *mut u8, len: u32, flags: u32) -> i32;
     const BCRYPT_USE_SYSTEM_PREFERRED_RNG: u32 = 0x2;
-    unsafe {
-        let m = LoadLibraryA(b"bcrypt.dll\0".as_ptr());
-        let p = if m != 0 { GetProcAddress(m, b"BCryptGenRandom\0".as_ptr()) } else { std::ptr::null() };
-        assert!(!p.is_null(), "BCryptGenRandom is not available");
-        let f: GenRandom = std::mem::transmute(p);
-        for chunk in buf.chunks_mut(1 << 30) {
-            let st = f(0, chunk.as_mut_ptr(), chunk.len() as u32, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-            assert!(st == 0, "BCryptGenRandom failed (status {:#x})", st);
-        }
+    for chunk in buf.chunks_mut(1 << 30) {
+        let st = unsafe { BCryptGenRandom(0, chunk.as_mut_ptr(), chunk.len() as u32, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+        assert!(st == 0, "BCryptGenRandom failed (status {:#x})", st);
     }
 }
 

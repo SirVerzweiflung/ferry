@@ -60,14 +60,31 @@ export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="-C target-feature=+crt-stat
 BIN="$PWD/target/$TARGET/release"
 mkdir -p dist
 OUT="$PWD/dist/FerrySetup-$VERSION.exe"
+
+# Optional code signing (removes the SmartScreen warning once the certificate has reputation,
+# and makes Defender's heuristics far less likely to flag Ferry). See WINDOWS-DEFENDER.md.
+sign() {
+    [ -n "${FERRY_SIGN_PFX:-}" ] || return 0
+    command -v osslsigncode >/dev/null || die "FERRY_SIGN_PFX is set but osslsigncode is missing (sudo apt install osslsigncode)"
+    osslsigncode sign -pkcs12 "$FERRY_SIGN_PFX" -pass "${FERRY_SIGN_PASS:-}" -h sha256 \
+        -n "Ferry" ${FERRY_SIGN_URL:+-i "$FERRY_SIGN_URL"} -t "${FERRY_SIGN_TIMESTAMP:-http://timestamp.digicert.com}" \
+        -in "$1" -out "$1.signed" && mv "$1.signed" "$1"
+    echo "    signed $(basename "$1")"
+}
+if [ -n "${FERRY_SIGN_PFX:-}" ]; then
+    echo "==> Signing the programs"
+    sign "$BIN/ferry.exe"
+    sign "$BIN/ferryd.exe"
+fi
+
 echo "==> Packaging installer"
 ( cd packaging/windows && makensis -V2 -DVERSION="$VERSION" -DSRC="$BIN" -DOUTFILE="$OUT" ferry.nsi )
-
-if command -v osslsigncode >/dev/null && [ -n "${FERRY_SIGN_PFX:-}" ]; then
-    echo "==> Signing"
-    osslsigncode sign -pkcs12 "$FERRY_SIGN_PFX" -pass "${FERRY_SIGN_PASS:-}" \
-        -n "Ferry" -t http://timestamp.digicert.com -in "$OUT" -out "$OUT.signed" && mv "$OUT.signed" "$OUT"
+if [ -n "${FERRY_SIGN_PFX:-}" ]; then
+    echo "==> Signing the installer"
+    sign "$OUT"
 fi
 
 echo "==> Done: $OUT ($(du -h "$OUT" | cut -f1))"
-echo "    Copy it to the Windows PC and run it. Unsigned: SmartScreen -> More info -> Run anyway."
+if [ -z "${FERRY_SIGN_PFX:-}" ]; then
+    echo "    Not code-signed: see WINDOWS-DEFENDER.md for SmartScreen / Defender warnings."
+fi

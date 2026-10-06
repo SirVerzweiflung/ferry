@@ -71,14 +71,16 @@ Double-click **`desktop\install.cmd`**. The script:
 
 ```bash
 sudo apt install mingw-w64 nsis        # Fedora: sudo dnf install mingw64-gcc mingw32-nsis
-cd desktop && ./package-windows.sh     # -> desktop/dist/FerrySetup-0.2.0.exe
+cd desktop && ./package-windows.sh     # -> desktop/dist/FerrySetup-0.2.1.exe
 ```
 
 The installer does the same things as `install.cmd` and adds an uninstaller under Settings → Apps.
-It needs no admin rights apart from the one firewall prompt. It isn't code-signed, so SmartScreen
-warns: click *More info → Run anyway*. If you have a certificate, set `FERRY_SIGN_PFX` and
-`FERRY_SIGN_PASS` and install `osslsigncode`, and the script signs it. The GitHub workflow in
-`.github/` builds the installer too.
+It needs no admin rights apart from the one firewall prompt. The GitHub workflow in `.github/`
+builds the installer too.
+
+Unsigned, it triggers Windows' "Windows protected your PC" prompt (*More info → Run anyway*). It may
+also trigger a heuristic Defender false positive. **[WINDOWS-DEFENDER.md](WINDOWS-DEFENDER.md)**
+explains what was changed in v0.2 to avoid that and how to sign the build.
 
 Set your Wi-Fi to **Private network** in Windows settings, or the phone can't connect.
 Clipboard sync is automatic both ways, as on Linux. Windows reports changes as events, so

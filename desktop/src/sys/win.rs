@@ -118,12 +118,10 @@ struct OPENFILENAMEW {
     flags_ex: u32,
 }
 
-// Only kernel32 is linked at build time (always available, also with the GNU toolchain
-// that needs no Visual Studio). Everything else is resolved at runtime via GetProcAddress.
+// Normal (visible) imports: every Windows function Ferry uses is listed in the .exe's
+// import table. (Resolving APIs at run time looks like malware to virus scanners.)
 #[link(name = "kernel32")]
 extern "system" {
-    fn LoadLibraryW(name: *const u16) -> HANDLE;
-    fn GetProcAddress(module: HANDLE, name: *const u8) -> *const c_void;
     fn GetModuleHandleW(name: *const u16) -> HANDLE;
     fn GlobalAlloc(flags: u32, bytes: usize) -> HANDLE;
     fn GlobalLock(h: HANDLE) -> *mut c_void;
@@ -132,67 +130,57 @@ extern "system" {
     fn Sleep(ms: u32);
 }
 
-fn resolve(lib: &str, name: &str) -> usize {
-    let l = wide(lib);
-    let n: Vec<u8> = name.bytes().chain(std::iter::once(0)).collect();
-    unsafe {
-        let m = LoadLibraryW(l.as_ptr());
-        let p = if m != 0 { GetProcAddress(m, n.as_ptr()) } else { null() };
-        if p.is_null() {
-            eprintln!("ferry: {}!{} missing", lib, name);
-            std::process::abort();
-        }
-        p as usize
-    }
+#[link(name = "user32")]
+extern "system" {
+    fn RegisterClassExW(wc: *const WNDCLASSEXW) -> u16;
+    fn CreateWindowExW(ex: u32, class: *const u16, name: *const u16, style: u32, x: i32, y: i32, w: i32, h: i32, parent: HWND, menu: HANDLE, inst: HANDLE, param: *mut c_void) -> HWND;
+    fn DefWindowProcW(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT;
+    fn GetMessageW(m: *mut MSG, h: HWND, min: u32, max: u32) -> i32;
+    fn TranslateMessage(m: *const MSG) -> i32;
+    fn DispatchMessageW(m: *const MSG) -> LRESULT;
+    fn PostMessageW(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> i32;
+    fn PostQuitMessage(code: i32);
+    fn CreatePopupMenu() -> HANDLE;
+    fn AppendMenuW(menu: HANDLE, flags: u32, id: usize, text: *const u16) -> i32;
+    fn TrackPopupMenu(menu: HANDLE, flags: u32, x: i32, y: i32, r: i32, h: HWND, rect: *const c_void) -> i32;
+    fn DestroyMenu(menu: HANDLE) -> i32;
+    fn SetForegroundWindow(h: HWND) -> i32;
+    fn GetCursorPos(p: *mut POINT) -> i32;
+    fn MessageBoxW(h: HWND, text: *const u16, caption: *const u16, t: u32) -> i32;
+    fn FindWindowW(class: *const u16, name: *const u16) -> HWND;
+    fn RegisterWindowMessageW(s: *const u16) -> u32;
+    fn OpenClipboard(h: HWND) -> i32;
+    fn CloseClipboard() -> i32;
+    fn EmptyClipboard() -> i32;
+    fn GetClipboardData(fmt: u32) -> HANDLE;
+    fn SetClipboardData(fmt: u32, h: HANDLE) -> HANDLE;
+    fn IsClipboardFormatAvailable(fmt: u32) -> i32;
+    fn RegisterClipboardFormatW(name: *const u16) -> u32;
+    fn AddClipboardFormatListener(h: HWND) -> i32;
+    fn CreateIconIndirect(ii: *const ICONINFO) -> HANDLE;
+    fn DestroyWindow(h: HWND) -> i32;
 }
 
-macro_rules! dynfn {
-    ($lib:literal, fn $name:ident($($a:ident: $t:ty),*) -> $r:ty) => {
-        unsafe fn $name($($a: $t),*) -> $r {
-            static P: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            let mut p = P.load(Ordering::Relaxed);
-            if p == 0 {
-                p = resolve($lib, stringify!($name));
-                P.store(p, Ordering::Relaxed);
-            }
-            let f: unsafe extern "system" fn($($t),*) -> $r = std::mem::transmute(p);
-            f($($a),*)
-        }
-    };
+#[link(name = "shell32")]
+extern "system" {
+    fn Shell_NotifyIconW(msg: u32, data: *const NOTIFYICONDATAW) -> i32;
+    fn ShellExecuteW(h: HWND, op: *const u16, file: *const u16, params: *const u16, dir: *const u16, show: i32) -> HANDLE;
 }
 
-dynfn!("user32.dll", fn RegisterClassExW(wc: *const WNDCLASSEXW) -> u16);
-dynfn!("user32.dll", fn CreateWindowExW(ex: u32, class: *const u16, name: *const u16, style: u32, x: i32, y: i32, w: i32, h: i32, parent: HWND, menu: HANDLE, inst: HANDLE, param: *mut c_void) -> HWND);
-dynfn!("user32.dll", fn DefWindowProcW(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT);
-dynfn!("user32.dll", fn GetMessageW(m: *mut MSG, h: HWND, min: u32, max: u32) -> i32);
-dynfn!("user32.dll", fn TranslateMessage(m: *const MSG) -> i32);
-dynfn!("user32.dll", fn DispatchMessageW(m: *const MSG) -> LRESULT);
-dynfn!("user32.dll", fn PostMessageW(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> i32);
-dynfn!("user32.dll", fn PostQuitMessage(code: i32) -> ());
-dynfn!("user32.dll", fn CreatePopupMenu() -> HANDLE);
-dynfn!("user32.dll", fn AppendMenuW(menu: HANDLE, flags: u32, id: usize, text: *const u16) -> i32);
-dynfn!("user32.dll", fn TrackPopupMenu(menu: HANDLE, flags: u32, x: i32, y: i32, r: i32, h: HWND, rect: *const c_void) -> i32);
-dynfn!("user32.dll", fn DestroyMenu(menu: HANDLE) -> i32);
-dynfn!("user32.dll", fn SetForegroundWindow(h: HWND) -> i32);
-dynfn!("user32.dll", fn GetCursorPos(p: *mut POINT) -> i32);
-dynfn!("user32.dll", fn MessageBoxW(h: HWND, text: *const u16, caption: *const u16, t: u32) -> i32);
-dynfn!("user32.dll", fn FindWindowW(class: *const u16, name: *const u16) -> HWND);
-dynfn!("user32.dll", fn RegisterWindowMessageW(s: *const u16) -> u32);
-dynfn!("user32.dll", fn OpenClipboard(h: HWND) -> i32);
-dynfn!("user32.dll", fn CloseClipboard() -> i32);
-dynfn!("user32.dll", fn EmptyClipboard() -> i32);
-dynfn!("user32.dll", fn GetClipboardData(fmt: u32) -> HANDLE);
-dynfn!("user32.dll", fn SetClipboardData(fmt: u32, h: HANDLE) -> HANDLE);
-dynfn!("user32.dll", fn IsClipboardFormatAvailable(fmt: u32) -> i32);
-dynfn!("user32.dll", fn RegisterClipboardFormatW(name: *const u16) -> u32);
-dynfn!("user32.dll", fn AddClipboardFormatListener(h: HWND) -> i32);
-dynfn!("user32.dll", fn CreateIconIndirect(ii: *const ICONINFO) -> HANDLE);
-dynfn!("user32.dll", fn DestroyWindow(h: HWND) -> i32);
-dynfn!("shell32.dll", fn Shell_NotifyIconW(msg: u32, data: *const NOTIFYICONDATAW) -> i32);
-dynfn!("shell32.dll", fn ShellExecuteW(h: HWND, op: *const u16, file: *const u16, params: *const u16, dir: *const u16, show: i32) -> HANDLE);
-dynfn!("comdlg32.dll", fn GetOpenFileNameW(ofn: *mut OPENFILENAMEW) -> i32);
-dynfn!("gdi32.dll", fn CreateBitmap(w: i32, h: i32, planes: u32, bpp: u32, bits: *const c_void) -> HANDLE);
-dynfn!("ole32.dll", fn CoInitializeEx(reserved: *const c_void, coinit: u32) -> i32);
+#[link(name = "comdlg32")]
+extern "system" {
+    fn GetOpenFileNameW(ofn: *mut OPENFILENAMEW) -> i32;
+}
+
+#[link(name = "gdi32")]
+extern "system" {
+    fn CreateBitmap(w: i32, h: i32, planes: u32, bpp: u32, bits: *const c_void) -> HANDLE;
+}
+
+#[link(name = "ole32")]
+extern "system" {
+    fn CoInitializeEx(reserved: *const c_void, coinit: u32) -> i32;
+}
 
 const WM_DESTROY: u32 = 0x0002;
 const WM_CLOSE: u32 = 0x0010;
