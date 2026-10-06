@@ -203,6 +203,19 @@ impl Inbox {
         self.items.lock().unwrap().iter().filter(|p| &p.from_id == from).map(|p| p.id.clone()).collect()
     }
 
+    /// Deletes transfers older than `ttl` seconds (as of `now`). Returns how many.
+    fn purge(items: &mut Vec<Pending>, ttl: u64, now: u64) -> usize {
+        let before = items.len();
+        items.retain(|p| {
+            let keep = p.time + ttl > now;
+            if !keep {
+                Inbox::discard(p);
+            }
+            keep
+        });
+        before - items.len()
+    }
+
     /// Blocks forever, deleting transfers older than `hours()`. Sleeps until the next
     /// expiry (or until something new arrives) - never polls.
     pub fn expiry_loop(&self, hours: impl Fn() -> u64, on_change: impl Fn()) {
@@ -210,15 +223,7 @@ impl Inbox {
         loop {
             let ttl = hours().max(1) * 3600;
             let now = now_secs();
-            let before = g.len();
-            g.retain(|p| {
-                let keep = p.time + ttl > now;
-                if !keep {
-                    Inbox::discard(p);
-                }
-                keep
-            });
-            if g.len() != before {
+            if Inbox::purge(&mut g, ttl, now) > 0 {
                 drop(g);
                 on_change();
                 g = self.items.lock().unwrap();
@@ -230,5 +235,46 @@ impl Inbox {
                 None => self.changed.wait(g).unwrap(),
             };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn store_reload_limits_and_expiry() {
+        let root = std::env::temp_dir().join(format!("ferry-inbox-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let ib = Inbox::load(root.clone());
+        // a transfer with a file and a text, persisted and reloaded
+        let mut p = ib.begin("Bob's PC", [7; 16], "10.0.0.9").unwrap();
+        fs::write(p.dir.join("a.txt"), b"hello").unwrap();
+        p.files.push(("a.txt".into(), 5));
+        p.text = Some("tab\there\nnew line".into());
+        ib.commit(p).unwrap();
+        // a half-received transfer (no meta) is removed on load
+        let half = ib.begin("x", [8; 16], "10.0.0.8").unwrap();
+        let ib = Inbox::load(root.clone());
+        assert!(!half.dir.exists());
+        let l = ib.list();
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].from_name, "Bob's PC");
+        assert_eq!(l[0].text.as_deref(), Some("tab\there\nnew line"));
+        assert_eq!(l[0].summary(), "a.txt (5 B) and a text");
+        // per-sender limit (by id or ip)
+        let q = ib.begin("Bob's PC", [7; 16], "10.0.0.9").unwrap();
+        ib.commit(q).unwrap();
+        assert!(!ib.has_room_for(&[7; 16], "10.0.0.1"));
+        assert!(!ib.has_room_for(&[1; 16], "10.0.0.9"));
+        assert!(ib.has_room_for(&[1; 16], "10.0.0.1"));
+        // expiry: nothing is old yet; 25 h later both are gone, files included
+        let dir = ib.list()[0].dir.clone();
+        let mut g = ib.items.lock().unwrap();
+        assert_eq!(Inbox::purge(&mut g, 24 * 3600, now_secs()), 0);
+        assert_eq!(Inbox::purge(&mut g, 24 * 3600, now_secs() + 25 * 3600), 2);
+        assert!(g.is_empty() && !dir.exists());
+        drop(g);
+        let _ = fs::remove_dir_all(&root);
     }
 }
