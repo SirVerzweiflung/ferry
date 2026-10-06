@@ -3,6 +3,6 @@
   "name": "Ferry",
   "description": "Panel menu and clipboard bridge for Ferry (file & clipboard sharing with your phone).",
   "shell-version": ["45", "46", "47", "48", "49"],
-  "version": 1,
+  "version": 2,
   "url": "https://example.invalid/ferry"
 }

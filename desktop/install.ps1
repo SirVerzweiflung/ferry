@@ -55,6 +55,8 @@ Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Na
 $sh = New-Object -ComObject WScript.Shell
 $lnk = $sh.CreateShortcut((Join-Path $env:APPDATA 'Microsoft\Windows\SendTo\Phone (Ferry).lnk'))
 $lnk.TargetPath = $exe; $lnk.Arguments = 'send'; $lnk.Description = 'Send to your phone with Ferry'; $lnk.Save()
+$lnk = $sh.CreateShortcut((Join-Path $env:APPDATA 'Microsoft\Windows\SendTo\Ferry (choose device).lnk'))
+$lnk.TargetPath = $exe; $lnk.Arguments = 'send --choose'; $lnk.Description = 'Send with Ferry to a device of your choice'; $lnk.Save()
 $lnk = $sh.CreateShortcut((Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Ferry.lnk'))
 $lnk.TargetPath = $exe; $lnk.Description = 'Ferry - share files and clipboard with your phone'; $lnk.Save()
 

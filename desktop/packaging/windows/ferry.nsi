@@ -42,7 +42,7 @@ VIAddVersionKey "LegalCopyright" "MIT License"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_TITLE "Ferry is installed"
-!define MUI_FINISHPAGE_TEXT "Click the Ferry icon in the system tray (maybe hidden under ^) and choose $\"Pair new phone...$\".$\r$\n$\r$\nTo send files: right-click them in Explorer > Send to > Phone (Ferry).$\r$\n$\r$\nImportant: your Wi-Fi must be set to $\"Private network$\" in Windows settings."
+!define MUI_FINISHPAGE_TEXT "Click the Ferry icon in the system tray (maybe hidden under ^) and choose $\"Pair a new device...$\".$\r$\n$\r$\nTo send files: right-click them in Explorer > Send to > Phone (Ferry), or Ferry (choose device) for other computers.$\r$\n$\r$\nImportant: your Wi-Fi must be set to $\"Private network$\" in Windows settings."
 !define MUI_FINISHPAGE_RUN "$INSTDIR\ferryd.exe"
 !define MUI_FINISHPAGE_RUN_TEXT "Start Ferry now"
 !insertmacro MUI_PAGE_FINISH
@@ -70,6 +70,7 @@ Section "Ferry" SecMain
   ; Start menu + Explorer "Send to"
   CreateShortcut "$SMPROGRAMS\Ferry.lnk" "$INSTDIR\ferryd.exe" "" "$INSTDIR\ferry.ico" 0
   CreateShortcut "$SENDTO\Phone (Ferry).lnk" "$INSTDIR\ferryd.exe" "send" "$INSTDIR\ferry.ico" 0
+  CreateShortcut "$SENDTO\Ferry (choose device).lnk" "$INSTDIR\ferryd.exe" "send --choose" "$INSTDIR\ferry.ico" 0
 
   ; "ferry" command for terminals (user PATH)
   nsExec::Exec `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$d='$INSTDIR'; $$p=[Environment]::GetEnvironmentVariable('Path','User'); if(-not $$p){$$p=''}; if(($$p -split ';') -notcontains $$d){[Environment]::SetEnvironmentVariable('Path',($$p.TrimEnd(';')+';'+$$d).TrimStart(';'),'User')}"`
@@ -113,6 +114,7 @@ Section "Uninstall"
 
   Delete "$SMPROGRAMS\Ferry.lnk"
   Delete "$SENDTO\Phone (Ferry).lnk"
+  Delete "$SENDTO\Ferry (choose device).lnk"
   DeleteRegValue HKCU "${RUN_KEY}" "Ferry"
   DeleteRegKey HKCU "${UNINST_KEY}"
 

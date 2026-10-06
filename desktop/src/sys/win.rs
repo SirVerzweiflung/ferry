@@ -187,6 +187,7 @@ dynfn!("user32.dll", fn IsClipboardFormatAvailable(fmt: u32) -> i32);
 dynfn!("user32.dll", fn RegisterClipboardFormatW(name: *const u16) -> u32);
 dynfn!("user32.dll", fn AddClipboardFormatListener(h: HWND) -> i32);
 dynfn!("user32.dll", fn CreateIconIndirect(ii: *const ICONINFO) -> HANDLE);
+dynfn!("user32.dll", fn DestroyWindow(h: HWND) -> i32);
 dynfn!("shell32.dll", fn Shell_NotifyIconW(msg: u32, data: *const NOTIFYICONDATAW) -> i32);
 dynfn!("shell32.dll", fn ShellExecuteW(h: HWND, op: *const u16, file: *const u16, params: *const u16, dir: *const u16, show: i32) -> HANDLE);
 dynfn!("comdlg32.dll", fn GetOpenFileNameW(ofn: *mut OPENFILENAMEW) -> i32);
@@ -231,11 +232,14 @@ const COINIT_APARTMENTTHREADED: u32 = 0x2;
 
 const PAIR_TITLE: &str = "Ferry - pair a phone";
 const ID_SEND_CLIP: usize = 2;
-const ID_SEND_FILES: usize = 3;
 const ID_PAIR: usize = 4;
 const ID_AUTO: usize = 5;
 const ID_OPEN: usize = 6;
 const ID_QUIT: usize = 7;
+const ID_VISIBLE: usize = 8;
+const ID_DEVICE_BASE: usize = 100; // + index into the device list
+const ID_INCOMING_BASE: usize = 1000; // + 3 * index + {0 accept, 1 decline, 2 block}
+const MF_POPUP: u32 = 0x10;
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -254,6 +258,7 @@ fn copy_w(dst: &mut [u16], s: &str) {
 }
 
 enum Ev {
+    Incoming(String, String),
     SetClip(String),
     Notify(String, String, Option<PathBuf>),
     Paired(String),
@@ -267,6 +272,11 @@ struct Gui {
     taskbar_created: AtomicU32,
     queue: Mutex<Vec<Ev>>,
     last_open: Mutex<Option<PathBuf>>,
+    /// The last notification was about Incoming: clicking it opens the tray menu.
+    last_is_incoming: std::sync::atomic::AtomicBool,
+    /// Device list / incoming list behind the currently open menu.
+    menu_devices: Mutex<Vec<crate::daemon::DevInfo>>,
+    menu_incoming: Mutex<Vec<String>>,
 }
 
 static GUI: OnceLock<Gui> = OnceLock::new();
@@ -287,6 +297,12 @@ pub fn notify(title: &str, body: &str) {
     if !post(Ev::Notify(title.into(), body.into(), None)) {
         eprintln!("[notify] {}: {}", title, body);
     }
+}
+
+/// Transfer from an unpaired device: a normal notification (no dialog). Clicking it opens
+/// the tray menu, where Incoming has Accept / Decline / Block.
+pub fn notify_incoming(title: &str, body: &str, _on_choice: Box<dyn FnOnce(&str) + Send>) {
+    post(Ev::Incoming(title.into(), format!("{} Click to choose.", body)));
 }
 
 pub fn notify_file(title: &str, body: &str, open: &Path) {
@@ -472,6 +488,33 @@ pub fn init_logging() {
     }
 }
 
+/// Small popup menu at the mouse pointer to pick a device (Explorer "Send to" chooser).
+/// `devices`: (id, label). Returns the chosen id.
+pub fn choose_device(title: &str, devices: &[(String, String)]) -> Option<String> {
+    unsafe {
+        let class = wide("STATIC");
+        let empty = wide("");
+        let h = CreateWindowExW(0, class.as_ptr(), empty.as_ptr(), 0, 0, 0, 0, 0, 0, 0, GetModuleHandleW(null()), null_mut());
+        let m = CreatePopupMenu();
+        let t = wide(title);
+        AppendMenuW(m, MF_STRING | MF_GRAYED, 1, t.as_ptr());
+        AppendMenuW(m, MF_SEPARATOR, 0, null());
+        for (i, (_, label)) in devices.iter().enumerate() {
+            let w = wide(label);
+            AppendMenuW(m, if label.starts_with("--") { MF_STRING | MF_GRAYED } else { MF_STRING }, 100 + i, w.as_ptr());
+        }
+        let mut pt = POINT::default();
+        GetCursorPos(&mut pt);
+        SetForegroundWindow(h);
+        let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, null()) as usize;
+        DestroyMenu(m);
+        if h != 0 {
+            DestroyWindow(h);
+        }
+        cmd.checked_sub(100).and_then(|i| devices.get(i)).map(|d| d.0.clone()).filter(|id| !id.is_empty())
+    }
+}
+
 pub fn error_box(msg: &str) {
     let (t, c) = (wide(msg), wide("Ferry"));
     unsafe { MessageBoxW(0, t.as_ptr(), c.as_ptr(), MB_ICONERROR | MB_SETFOREGROUND) };
@@ -589,34 +632,82 @@ fn toast(g: &Gui, title: &str, body: &str) {
 
 fn show_menu(g: &Gui) {
     let st = &g.st;
+    // short network scan so nearby devices are current (~0.7 s)
+    let devices = st.devices(true);
+    let incoming = st.incoming();
     let peers = st.peer_names();
     let status = if peers.is_empty() {
-        format!("{} - no phone paired yet", st.device_name())
+        format!("{} - nothing paired yet", st.device_name())
     } else {
         format!("{}  \u{21c4}  {}", st.device_name(), peers.join(", "))
     };
     unsafe {
         let m = CreatePopupMenu();
-        let add = |flags: u32, id: usize, text: &str| {
+        let add = |menu: HANDLE, flags: u32, id: usize, text: &str| {
             let w = wide(text);
-            AppendMenuW(m, flags, id, w.as_ptr());
+            AppendMenuW(menu, flags, id, w.as_ptr());
         };
-        add(MF_STRING | MF_GRAYED, 1, &status);
+        add(m, MF_STRING | MF_GRAYED, 1, &status);
         AppendMenuW(m, MF_SEPARATOR, 0, null());
-        add(MF_STRING, ID_SEND_CLIP, "Send clipboard");
-        add(MF_STRING, ID_SEND_FILES, "Send files…");
-        add(MF_STRING, ID_PAIR, "Pair new phone…");
+
+        if !incoming.is_empty() {
+            add(m, MF_STRING | MF_GRAYED, 1, &format!("Incoming from devices that are not paired ({})", incoming.len()));
+            for (i, p) in incoming.iter().enumerate() {
+                let sub = CreatePopupMenu();
+                let base = ID_INCOMING_BASE + 3 * i;
+                add(sub, MF_STRING, base, "Accept");
+                add(sub, MF_STRING, base + 1, "Decline");
+                add(sub, MF_STRING, base + 2, &format!("Decline and block {}", p.from_name));
+                add(m, MF_POPUP, sub as usize, &format!("    {}: {}", p.from_name, p.summary()));
+            }
+            AppendMenuW(m, MF_SEPARATOR, 0, null());
+        }
+
+        add(m, MF_STRING, ID_SEND_CLIP, "Send clipboard to my devices");
+        let sub = CreatePopupMenu();
+        add(sub, MF_STRING | MF_GRAYED, 1, "My devices");
+        let mine: Vec<usize> = (0..devices.len()).filter(|i| devices[*i].paired).collect();
+        let near: Vec<usize> = (0..devices.len()).filter(|i| !devices[*i].paired).collect();
+        if mine.is_empty() {
+            add(sub, MF_STRING | MF_GRAYED, 1, "    none paired yet");
+        }
+        for (n, i) in mine.iter().enumerate() {
+            let d = &devices[*i];
+            let label = format!(
+                "{}{}{}",
+                if n == 0 { "\u{2605} " } else { "" },
+                d.name,
+                if d.online { "" } else { "  (offline - will be queued)" }
+            );
+            add(sub, MF_STRING, ID_DEVICE_BASE + i, &label);
+        }
+        AppendMenuW(sub, MF_SEPARATOR, 0, null());
+        add(sub, MF_STRING | MF_GRAYED, 1, "Nearby - they have to accept");
+        if near.is_empty() {
+            add(sub, MF_STRING | MF_GRAYED, 1, "    none found");
+        }
+        for i in &near {
+            let d = &devices[*i];
+            add(sub, MF_STRING, ID_DEVICE_BASE + i, &format!("{}  ({})", d.name, crate::daemon::kind_str(d.kind)));
+        }
+        add(m, MF_POPUP, sub as usize, "Send files to");
+        add(m, MF_STRING, ID_PAIR, "Pair a new device\u{2026}");
         AppendMenuW(m, MF_SEPARATOR, 0, null());
-        add(MF_STRING | if st.auto_clipboard() { MF_CHECKED } else { 0 }, ID_AUTO, "Sync clipboard automatically");
-        add(MF_STRING, ID_OPEN, "Open received files");
+        add(m, MF_STRING | if st.auto_clipboard() { MF_CHECKED } else { 0 }, ID_AUTO, "Sync clipboard with my devices");
+        add(m, MF_STRING | if st.visible() { MF_CHECKED } else { 0 }, ID_VISIBLE, "Visible to nearby devices");
+        add(m, MF_STRING, ID_OPEN, "Open received files");
         AppendMenuW(m, MF_SEPARATOR, 0, null());
-        add(MF_STRING, ID_QUIT, "Quit Ferry");
+        add(m, MF_STRING, ID_QUIT, "Quit Ferry");
+
+        *g.menu_devices.lock().unwrap() = devices;
+        *g.menu_incoming.lock().unwrap() = incoming.iter().map(|p| p.id.clone()).collect();
+
         let mut pt = POINT::default();
         GetCursorPos(&mut pt);
         let hwnd = g.hwnd.load(Ordering::SeqCst);
         SetForegroundWindow(hwnd); // required so the menu closes when clicking elsewhere
         let cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, null());
-        DestroyMenu(m);
+        DestroyMenu(m); // also destroys the submenus
         menu_command(g, cmd as usize);
     }
 }
@@ -634,13 +725,36 @@ fn menu_command(g: &Gui, cmd: usize) {
             }
             None => notify("Ferry", "The clipboard does not contain text."),
         },
-        ID_SEND_FILES => {
-            std::thread::spawn(move || {
-                let files = pick_files();
-                if !files.is_empty() {
-                    let _ = st.send_files_now("", &files);
-                }
-            });
+        c if (ID_DEVICE_BASE..ID_INCOMING_BASE).contains(&c) => {
+            let dev = g.menu_devices.lock().unwrap().get(c - ID_DEVICE_BASE).cloned();
+            if let Some(d) = dev {
+                std::thread::spawn(move || {
+                    let files = pick_files();
+                    if !files.is_empty() {
+                        let _ = st.send_to(&crate::crypto::to_hex(&d.id), crate::daemon::Payload::Files(files));
+                    }
+                });
+            }
+        }
+        c if c >= ID_INCOMING_BASE => {
+            let k = c - ID_INCOMING_BASE;
+            let id = g.menu_incoming.lock().unwrap().get(k / 3).cloned();
+            if let Some(id) = id {
+                std::thread::spawn(move || {
+                    let r = match k % 3 {
+                        0 => st.accept(&id),
+                        1 => st.decline(&id),
+                        _ => st.block(&id),
+                    };
+                    if let Err(e) = r {
+                        notify("Ferry", &e);
+                    }
+                });
+            }
+        }
+        ID_VISIBLE => {
+            let on = !st.visible();
+            let _ = st.set_option("visible", if on { "on" } else { "off" });
         }
         ID_PAIR => {
             let (code, addrs) = st.pair_show();
@@ -690,7 +804,13 @@ fn drain_events(g: &Gui) {
     for ev in evs {
         match ev {
             Ev::SetClip(t) => clipboard_write(hwnd, &t),
+            Ev::Incoming(title, body) => {
+                *g.last_open.lock().unwrap() = None;
+                g.last_is_incoming.store(true, Ordering::SeqCst);
+                toast(g, &title, &body);
+            }
             Ev::Notify(title, body, open) => {
+                g.last_is_incoming.store(false, Ordering::SeqCst);
                 *g.last_open.lock().unwrap() = open;
                 toast(g, &title, &body);
             }
@@ -713,6 +833,7 @@ unsafe extern "system" fn wnd_proc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> L
         WM_APP_TRAY => {
             match (l as u32) & 0xffff {
                 WM_LBUTTONUP | WM_RBUTTONUP => show_menu(g),
+                NIN_BALLOONUSERCLICK if g.last_is_incoming.load(Ordering::SeqCst) => show_menu(g),
                 NIN_BALLOONUSERCLICK => {
                     let p = g.last_open.lock().unwrap().clone();
                     if let Some(p) = p {
@@ -756,6 +877,9 @@ pub fn main_loop(st: Arc<State>) -> std::io::Result<()> {
         taskbar_created: AtomicU32::new(0),
         queue: Mutex::new(Vec::new()),
         last_open: Mutex::new(None),
+        last_is_incoming: std::sync::atomic::AtomicBool::new(false),
+        menu_devices: Mutex::new(Vec::new()),
+        menu_incoming: Mutex::new(Vec::new()),
     });
     unsafe {
         let inst = GetModuleHandleW(null());

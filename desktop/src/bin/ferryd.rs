@@ -23,6 +23,15 @@ fn connect_or_start() -> Result<ipc::Client, String> {
     Err("Ferry did not start".into())
 }
 
+fn absolute<S: AsRef<str>>(files: &[S]) -> Vec<String> {
+    files
+        .iter()
+        .map(|f| PathBuf::from(f.as_ref()))
+        .map(|f| std::fs::canonicalize(&f).unwrap_or(f).to_string_lossy().to_string())
+        .map(|s| s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s))
+        .collect()
+}
+
 fn forward(fields: &[&str]) -> Result<String, String> {
     let mut c = connect_or_start()?;
     c.send(fields).map_err(|e| e.to_string())?;
@@ -42,22 +51,45 @@ fn main() {
             eprintln!("ferry {}: starting", env!("CARGO_PKG_VERSION"));
             daemon::run().map(|_| String::new()).map_err(|e| e.to_string())
         }
+        ["send", "--choose", files @ ..] if !files.is_empty() => (|| {
+            let mut c = connect_or_start()?;
+            c.send(&["devices"]).map_err(|e| e.to_string())?;
+            let mut mine = Vec::new();
+            let mut near = Vec::new();
+            while let Ok(Some(f)) = c.recv() {
+                if f[0] == "devend" {
+                    break;
+                }
+                if f[0] == "dev" {
+                    let entry = (f[1].clone(), f[2].clone());
+                    if f[4] == "paired" { mine.push(entry) } else { near.push(entry) }
+                }
+            }
+            let mut items = vec![(String::new(), "-- My devices".to_string())];
+            items.extend(mine);
+            items.push((String::new(), "-- Nearby (they have to accept)".into()));
+            items.extend(near);
+            let Some(id) = sys::choose_device(&format!("Send {} file(s) to", files.len()), &items) else {
+                return Ok(String::new());
+            };
+            let abs = absolute(files);
+            let mut fields: Vec<&str> = vec!["sendfiles", &id];
+            fields.extend(abs.iter().map(|s| s.as_str()));
+            c.send(&fields).map_err(|e| e.to_string())?;
+            c.result()
+        })(),
         ["send", files @ ..] => {
             let files: Vec<PathBuf> = if files.is_empty() { sys::pick_files() } else { files.iter().map(PathBuf::from).collect() };
             if files.is_empty() {
                 return;
             }
-            let abs: Vec<String> = files
-                .iter()
-                .map(|f| std::fs::canonicalize(f).unwrap_or_else(|_| f.clone()).to_string_lossy().to_string())
-                .map(|s| s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s))
-                .collect();
+            let abs = absolute(&files.iter().map(|p| p.to_string_lossy().to_string()).collect::<Vec<_>>());
             let mut fields: Vec<&str> = vec!["sendfiles", ""];
             fields.extend(abs.iter().map(|s| s.as_str()));
             forward(&fields)
         }
         ["clip"] => forward(&["sendclip"]),
-        _ => Err("usage: ferryd [daemon | send FILE... | clip]".into()),
+        _ => Err("usage: ferryd [daemon | send [--choose] FILE... | clip]".into()),
     };
     if let Err(e) = res {
         eprintln!("ferry: {}", e);

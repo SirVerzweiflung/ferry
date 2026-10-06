@@ -121,6 +121,12 @@ fn main() {
                 }
             }
         }
+        ["devices", "--tsv"] => {
+            // id, name, kind, paired|nearby, online - for scripts (file manager integration)
+            for d in list(&["devices"], "dev", "devend") {
+                println!("{}\t{}\t{}\t{}\t{}", d[1], d[2], d[3], d[4], d[5]);
+            }
+        }
         ["devices"] => {
             let devs = list(&["devices"], "dev", "devend");
             let (mine, near): (Vec<_>, Vec<_>) = devs.into_iter().partition(|d| d[4] == "paired");

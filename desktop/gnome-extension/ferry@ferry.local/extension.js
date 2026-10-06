@@ -1,5 +1,6 @@
 // Ferry GNOME Shell extension (GNOME 45+).
-// - panel menu: send clipboard / files, pair a phone, open received files
+// - panel menu: send clipboard / files to my devices or nearby devices, pair,
+//   Incoming (transfers from unpaired devices) with Accept / Decline / Block
 // - clipboard bridge: GNOME Wayland does not let background apps read or write
 //   the clipboard, so the shell (which can) forwards changes to the daemon.
 //   Event driven (Meta.Selection 'owner-changed'), no polling.
@@ -147,6 +148,12 @@ class Link {
     }
 }
 
+function header(text) {
+    const h = new PopupMenu.PopupMenuItem(text, {reactive: false});
+    h.label.style = 'font-size: 0.85em; font-weight: bold; opacity: 0.7;';
+    return h;
+}
+
 const FerryIndicator = GObject.registerClass(
 class FerryIndicator extends PanelMenu.Button {
     _init(ext) {
@@ -157,26 +164,37 @@ class FerryIndicator extends PanelMenu.Button {
 
         this._status = new PopupMenu.PopupMenuItem('Ferry is not running', {reactive: false});
         this.menu.addMenuItem(this._status);
+
+        // Incoming: transfers from unpaired devices waiting for a decision (hidden when empty)
+        this._incomingSep = new PopupMenu.PopupSeparatorMenuItem();
+        this.menu.addMenuItem(this._incomingSep);
+        this._incoming = new PopupMenu.PopupMenuSection();
+        this.menu.addMenuItem(this._incoming);
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-        this._clipItem = new PopupMenu.PopupMenuItem('Send clipboard');
+        this._clipItem = new PopupMenu.PopupMenuItem('Send clipboard to my devices');
         this._clipItem.connect('activate', () => ext.sendClipboard());
         this.menu.addMenuItem(this._clipItem);
 
-        this._filesItem = new PopupMenu.PopupMenuItem('Send files…');
-        this._filesItem.connect('activate', () => ext.pickAndSend());
-        this.menu.addMenuItem(this._filesItem);
+        this._sendMenu = new PopupMenu.PopupSubMenuMenuItem('Send files to');
+        this.menu.addMenuItem(this._sendMenu);
+        this._setDevices(null);
 
-        this._pairItem = new PopupMenu.PopupMenuItem('Pair new phone…');
+        this._pairItem = new PopupMenu.PopupMenuItem('Pair a new device…');
         this._pairItem.connect('activate', () => ext.link.send('pairshow'));
         this.menu.addMenuItem(this._pairItem);
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
-        this._auto = new PopupMenu.PopupSwitchMenuItem('Sync clipboard automatically', true);
+        this._auto = new PopupMenu.PopupSwitchMenuItem('Sync clipboard with my devices', true);
         this._auto.connect('toggled', (_i, state) =>
             ext.link.send('set', 'auto_clipboard', state ? 'on' : 'off'));
         this.menu.addMenuItem(this._auto);
+
+        this._visible = new PopupMenu.PopupSwitchMenuItem('Visible to nearby devices', true);
+        this._visible.connect('toggled', (_i, state) =>
+            ext.link.send('set', 'visible', state ? 'on' : 'off'));
+        this.menu.addMenuItem(this._visible);
 
         this._openItem = new PopupMenu.PopupMenuItem('Open received files');
         this._openItem.connect('activate', () => {
@@ -186,28 +204,97 @@ class FerryIndicator extends PanelMenu.Button {
         this.menu.addMenuItem(this._openItem);
 
         this.menu.connect('open-state-changed', (_m, open) => {
-            if (open)
-                ext.link.send('status');
+            if (!open)
+                return;
+            ext.link.send('status');
+            ext.link.send('incoming');
+            ext.link.send('devices'); // short network scan, the submenu fills in when answers arrive
         });
+        this._setIncoming([]);
         this.setOnline(false);
     }
 
     setOnline(online) {
-        for (const i of [this._clipItem, this._filesItem, this._pairItem, this._auto, this._openItem])
+        for (const i of [this._clipItem, this._sendMenu, this._pairItem, this._auto, this._visible, this._openItem])
             i.setSensitive(online);
         this._icon.opacity = online ? 255 : 120;
         if (!online)
-            this._status.label.text = 'Ferry daemon is not running';
+            this._status.label.text = 'Ferry is not running';
     }
 
-    setStatus(name, peers, auto) {
-        const list = peers.length ? peers.join(', ') : 'no phone paired yet';
-        this._status.label.text = `${name} ⇄ ${list}`;
+    setStatus(name, peers, auto, visible, nIncoming) {
+        const list = peers.length ? peers.join(', ') : 'nothing paired yet';
+        this._status.label.text = `${name}  ⇄  ${list}`;
         this._auto.setToggleState(auto);
+        this._visible.setToggleState(visible);
+        this._icon.icon_name = nIncoming > 0 ? 'mail-unread-symbolic' : 'phone-symbolic';
     }
 
-    setAuto(auto) {
-        this._auto.setToggleState(auto);
+    setToggle(key, on) {
+        if (key === 'auto_clipboard')
+            this._auto.setToggleState(on);
+        else if (key === 'visible')
+            this._visible.setToggleState(on);
+    }
+
+    /** devices: null = still scanning, else [{id, name, kind, paired, online}] */
+    _setDevices(devices) {
+        const m = this._sendMenu.menu;
+        m.removeAll();
+        if (devices === null) {
+            m.addMenuItem(header('Looking for devices…'));
+            return;
+        }
+        const mine = devices.filter(d => d.paired);
+        const near = devices.filter(d => !d.paired);
+        m.addMenuItem(header('My devices'));
+        if (!mine.length)
+            m.addMenuItem(header('  none paired yet'));
+        mine.forEach((d, i) => {
+            const label = `${i === 0 ? '★ ' : ''}${d.name}${d.online ? '' : '  (offline - will be queued)'}`;
+            const it = new PopupMenu.PopupMenuItem(label);
+            it.connect('activate', () => this._ext.pickAndSend(d.id));
+            m.addMenuItem(it);
+        });
+        m.addMenuItem(header('Nearby - they have to accept'));
+        if (!near.length)
+            m.addMenuItem(header('  none found'));
+        for (const d of near) {
+            const it = new PopupMenu.PopupMenuItem(`${d.name}  (${d.kind})`);
+            it.connect('activate', () => this._ext.pickAndSend(d.id));
+            m.addMenuItem(it);
+        }
+    }
+
+    setDevices(devices) {
+        this._setDevices(devices);
+    }
+
+    /** items: [{id, from, summary}] */
+    _setIncoming(items) {
+        this._incoming.removeAll();
+        const any = items.length > 0;
+        this._incomingSep.visible = any;
+        this._incoming.actor.visible = any;
+        if (!any)
+            return;
+        this._incoming.addMenuItem(header(`Incoming from devices that are not paired (${items.length})`));
+        for (const it of items) {
+            const sub = new PopupMenu.PopupSubMenuMenuItem(`${it.from}: ${it.summary}`);
+            const add = (label, cmd) => {
+                const x = new PopupMenu.PopupMenuItem(label);
+                x.connect('activate', () => this._ext.link.send(cmd, it.id));
+                sub.menu.addMenuItem(x);
+            };
+            add('Accept', 'accept');
+            add('Decline', 'decline');
+            add(`Decline and block ${it.from}`, 'block');
+            this._incoming.addMenuItem(sub);
+        }
+    }
+
+    setIncoming(items) {
+        this._setIncoming(items);
     }
 });
 
@@ -216,12 +303,17 @@ export default class FerryExtension extends Extension {
         this.downloadDir = null;
         this._lastSet = null;
         this._pairDialog = null;
-        this._statusName = '';
-        this._peers = [];
+        this._st = {name: '', peers: [], auto: true, visible: true, nIncoming: 0};
+        this._devs = [];
+        this._inc = [];
         this._indicator = new FerryIndicator(this);
         Main.panel.addToStatusArea(this.uuid, this._indicator);
 
-        this.link = new Link(f => this._onLine(f), online => this._indicator?.setOnline(online));
+        this.link = new Link(f => this._onLine(f), online => {
+            this._indicator?.setOnline(online);
+            if (online)
+                this.link.send('incoming');
+        });
         this.link.start();
 
         this._selection = global.display.get_selection();
@@ -251,6 +343,11 @@ export default class FerryExtension extends Extension {
         this._indicator = null;
     }
 
+    _updateStatus() {
+        const s = this._st;
+        this._indicator?.setStatus(s.name, s.peers, s.auto, s.visible, s.nIncoming);
+    }
+
     _onLine(f) {
         switch (f[0]) {
         case 'setclip':
@@ -258,27 +355,48 @@ export default class FerryExtension extends Extension {
             St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, f[1]);
             break;
         case 'status':
-            this._statusName = f[1];
+            this._st.name = f[1];
             this.downloadDir = f[3];
-            this._auto = f[4] === '1';
-            this._peers = [];
+            this._st.auto = f[4] === '1';
+            this._st.visible = f[7] !== '0';
+            this._st.nIncoming = parseInt(f[8] || '0');
+            this._st.peers = [];
             break;
         case 'peer':
-            this._peers.push(f[2]);
+            this._st.peers.push(f[2]);
             break;
         case 'end':
-            this._indicator?.setStatus(this._statusName, this._peers, this._auto);
+            this._updateStatus();
             break;
-        case 'config':
-            if (f[1] === 'auto_clipboard')
-                this._indicator?.setAuto(f[2] === '1');
+        case 'dev':
+            this._devs.push({id: f[1], name: f[2], kind: f[3], paired: f[4] === 'paired', online: f[5] === '1'});
             break;
-        case 'pair':
-            this._showPair(f[1], f[3]);
+        case 'devend':
+            this._indicator?.setDevices(this._devs);
+            this._devs = [];
             break;
+        case 'in':
+            this._inc.push({id: f[1], from: f[2], summary: f[3]});
+            break;
+        case 'inend':
+            this._indicator?.setIncoming(this._inc);
+            this._st.nIncoming = this._inc.length;
+            this._updateStatus();
+            this._inc = [];
+            break;
+        case 'incoming':
+            this.link.send('incoming');
+            break;
+        case 'devices':
         case 'paired':
             this._closePair();
             this.link.send('status');
+            break;
+        case 'config':
+            this._indicator?.setToggle(f[1], f[2] === '1');
+            break;
+        case 'pair':
+            this._showPair(f[1], f[3]);
             break;
         case 'pairfailed':
             this._closePair();
@@ -300,11 +418,11 @@ export default class FerryExtension extends Extension {
         });
     }
 
-    pickAndSend() {
+    pickAndSend(target) {
         let proc;
         try {
             proc = Gio.Subprocess.new(
-                ['zenity', '--file-selection', '--multiple', '--separator=\n', '--title=Send to phone'],
+                ['zenity', '--file-selection', '--multiple', '--separator=\n', '--title=Send with Ferry'],
                 Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE);
         } catch (e) {
             Main.notify('Ferry', 'Install "zenity" to pick files, or right-click files in Files → Scripts → Send to phone.');
@@ -317,7 +435,7 @@ export default class FerryExtension extends Extension {
                     return;
                 const files = out.split('\n').filter(s => s.length);
                 if (files.length)
-                    this.link.send('sendfiles', '', ...files);
+                    this.link.send('sendfiles', target ?? '', ...files);
             } catch (e) {
                 console.error(`ferry: ${e}`);
             }
@@ -328,8 +446,8 @@ export default class FerryExtension extends Extension {
         this._closePair();
         const d = new ModalDialog.ModalDialog({destroyOnClose: true});
         const box = vbox('spacing: 14px; padding: 8px 16px; min-width: 360px;');
-        box.add_child(new St.Label({text: 'Pair a phone', style: 'font-weight: bold; font-size: 15pt;'}));
-        box.add_child(new St.Label({text: 'In the Ferry app tap “Pair with desktop” and enter:'}));
+        box.add_child(new St.Label({text: 'Pair a device', style: 'font-weight: bold; font-size: 15pt;'}));
+        box.add_child(new St.Label({text: 'On the phone (or the other PC) choose “Pair with computer” and enter:'}));
         const shown = addrs ? addrs.split(',').join('   or   ') : '(no network address found)';
         box.add_child(new St.Label({text: `Address:  ${shown}`, style: 'font-size: 13pt;'}));
         box.add_child(new St.Label({
@@ -337,7 +455,10 @@ export default class FerryExtension extends Extension {
             style: 'font-family: monospace; font-size: 30pt; font-weight: bold; padding: 6px 0;',
             x_align: Clutter.ActorAlign.CENTER,
         }));
-        box.add_child(new St.Label({text: 'The code is valid for 5 minutes.', style: 'color: #999;'}));
+        box.add_child(new St.Label({
+            text: 'Paired devices share the clipboard and send files without asking.\nThe code is valid for 5 minutes.',
+            style: 'color: #999;',
+        }));
         d.contentLayout.add_child(box);
         d.setButtons([{
             label: 'Cancel',

@@ -1,0 +1,13 @@
+#!/bin/sh
+# Files (Nautilus) -> Scripts -> "Send to device…": pick a paired or nearby device, then send.
+FERRY="$HOME/.local/bin/ferry"
+[ -x "$FERRY" ] || FERRY=ferry
+[ "$#" -eq 0 ] && exit 0
+choice=$("$FERRY" devices --tsv | awk -F'\t' '{
+        label = ($4 == "paired") ? "My device" : "Nearby (must accept)";
+        print $1; print $2; print label }' |
+    zenity --list --title="Send with Ferry" --text="Send $# file(s) to:" \
+        --column=id --column=Device --column=Type --hide-column=1 --print-column=1 \
+        --width=420 --height=360 2>/dev/null)
+[ -n "$choice" ] || exit 0
+exec "$FERRY" send --to "$choice" "$@"

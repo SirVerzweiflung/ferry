@@ -234,3 +234,22 @@ pub fn notify_incoming(title: &str, body: &str, on_choice: Box<dyn FnOnce(&str) 
         }
     });
 }
+
+/// Device chooser (zenity list). `devices`: (id, label); labels starting with "--" are headers.
+pub fn choose_device(title: &str, devices: &[(String, String)]) -> Option<String> {
+    let mut args: Vec<String> = vec![
+        "--list".into(),
+        format!("--title={}", title),
+        "--column=id".into(),
+        "--column=Device".into(),
+        "--hide-column=1".into(),
+        "--print-column=1".into(),
+    ];
+    for (id, label) in devices.iter().filter(|d| !d.0.is_empty()) {
+        args.push(id.clone());
+        args.push(label.clone());
+    }
+    let out = Command::new("zenity").args(&args).output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}

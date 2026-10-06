@@ -37,6 +37,7 @@ sed "s|^Exec=ferry-send|Exec=$BIN/ferry-send|; s|^Exec=ferry clip|Exec=$BIN/ferr
 
 # Files (Nautilus): right-click -> Scripts -> Send to phone
 install -Dm755 packaging/ferry-send "$HOME/.local/share/nautilus/scripts/Send to phone"
+install -Dm755 packaging/ferry-send-choose "$HOME/.local/share/nautilus/scripts/Send to device…"
 
 echo "==> Installing GNOME Shell extension"
 mkdir -p "$EXT_DIR"
