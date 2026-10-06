@@ -100,6 +100,12 @@ pub struct Config {
     pub download_dir: PathBuf,
     pub auto_clipboard: bool,
     pub notifications: bool,
+    /// Visible to unpaired devices on the network (they can send to Incoming).
+    pub visible: bool,
+    /// Max total size of unanswered transfers from unpaired devices.
+    pub incoming_limit_mb: u64,
+    /// Unanswered transfers from unpaired devices are deleted after this.
+    pub incoming_hours: u64,
 }
 
 impl Config {
@@ -110,6 +116,9 @@ impl Config {
             download_dir: default_download_dir(),
             auto_clipboard: true,
             notifications: true,
+            visible: true,
+            incoming_limit_mb: 2048,
+            incoming_hours: 24,
         };
         let path = config_dir().join("config");
         match fs::read_to_string(&path) {
@@ -141,7 +150,16 @@ impl Config {
             }
             "auto_clipboard" => self.auto_clipboard = b(val),
             "notifications" => self.notifications = b(val),
-            _ => return Err(format!("unknown setting '{}' (name, port, download_dir, auto_clipboard, notifications)", key)),
+            "visible" => self.visible = b(val),
+            "incoming_limit_mb" => self.incoming_limit_mb = val.parse().map_err(|_| "invalid number".to_string())?,
+            "incoming_hours" => self.incoming_hours = val.parse::<u64>().map_err(|_| "invalid number".to_string())?.max(1),
+            _ => {
+                return Err(format!(
+                    "unknown setting '{}' (name, download_dir, auto_clipboard, visible, notifications, \
+                     incoming_limit_mb, incoming_hours, port)",
+                    key
+                ))
+            }
         }
         Ok(())
     }
@@ -149,12 +167,17 @@ impl Config {
     pub fn save(&self) -> io::Result<()> {
         let s = format!(
             "# Ferry settings. Restart not needed when changed via `ferry set`.\n\
-             name = {}\nport = {}\ndownload_dir = {}\nauto_clipboard = {}\nnotifications = {}\n",
+             name = {}\nport = {}\ndownload_dir = {}\nauto_clipboard = {}\nnotifications = {}\n\
+             # Unpaired devices on the network: can they see you and send to Incoming?\n\
+             visible = {}\nincoming_limit_mb = {}\nincoming_hours = {}\n",
             self.name,
             self.port,
             self.download_dir.display(),
             self.auto_clipboard,
-            self.notifications
+            self.notifications,
+            self.visible,
+            self.incoming_limit_mb,
+            self.incoming_hours
         );
         write_private(&config_dir().join("config"), &s)
     }
@@ -181,6 +204,8 @@ pub struct Peer {
     pub key: [u8; 32],
     /// Last known "host:port".
     pub addr: Option<String>,
+    /// proto::KIND_PC / KIND_PHONE (0 = unknown, e.g. paired with v0.1).
+    pub kind: u8,
 }
 
 pub fn load_peers() -> Vec<Peer> {
@@ -200,6 +225,7 @@ pub fn load_peers() -> Vec<Peer> {
             name: f[1].to_string(),
             key: key.try_into().unwrap(),
             addr: if f[3].is_empty() { None } else { Some(f[3].to_string()) },
+            kind: f.get(4).and_then(|k| k.parse().ok()).unwrap_or(0),
         });
     }
     out
@@ -210,12 +236,44 @@ pub fn save_peers(peers: &[Peer]) -> io::Result<()> {
     for p in peers {
         let name: String = p.name.chars().filter(|c| *c != '\t' && *c != '\n').collect();
         s.push_str(&format!(
-            "{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\n",
             to_hex(&p.id),
             name,
             to_hex(&p.key),
-            p.addr.clone().unwrap_or_default()
+            p.addr.clone().unwrap_or_default(),
+            p.kind
         ));
     }
     write_private(&config_dir().join("peers"), &s)
+}
+
+/// Blocked unpaired devices: "id-hex \t ip \t name" per line.
+#[derive(Clone, Debug)]
+pub struct Blocked {
+    pub id: [u8; 16],
+    pub ip: String,
+    pub name: String,
+}
+
+pub fn load_blocked() -> Vec<Blocked> {
+    let s = fs::read_to_string(config_dir().join("blocked")).unwrap_or_default();
+    s.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            let id = from_hex(f.first()?)?;
+            Some(Blocked {
+                id: id.try_into().ok()?,
+                ip: f.get(1).unwrap_or(&"").to_string(),
+                name: f.get(2).unwrap_or(&"").to_string(),
+            })
+        })
+        .collect()
+}
+
+pub fn save_blocked(b: &[Blocked]) -> io::Result<()> {
+    let s: String = b
+        .iter()
+        .map(|x| format!("{}\t{}\t{}\n", to_hex(&x.id), x.ip, x.name.replace(['\t', '\n'], " ")))
+        .collect();
+    write_private(&config_dir().join("blocked"), &s)
 }

@@ -8,10 +8,15 @@ pub const MAGIC: &[u8; 4] = b"FRY1";
 pub const DEFAULT_PORT: u16 = 47800;
 pub const MODE_SESSION: u8 = 1;
 pub const MODE_PAIR: u8 = 2;
+/// v0.2: unpaired ("nearby") device. Encrypted but not authenticated; the receiver
+/// keeps everything in Incoming until the user accepts it.
+pub const MODE_GUEST: u8 = 3;
 
 pub const ST_OK: u8 = 0;
 pub const ST_UNKNOWN_PEER: u8 = 1;
 pub const ST_NOT_PAIRING: u8 = 2;
+pub const ST_NO_GUESTS: u8 = 3;
+pub const ST_BUSY: u8 = 4;
 
 pub const T_HELLO: u8 = 1;
 pub const T_CLIP: u8 = 2;
@@ -19,6 +24,11 @@ pub const T_FILE: u8 = 3;
 pub const T_DATA: u8 = 4;
 pub const T_ACK: u8 = 5;
 pub const T_BYE: u8 = 6;
+/// Guest sessions announce what they will send: count u32, total bytes u64, has_text u8.
+pub const T_OFFER: u8 = 7;
+
+pub const KIND_PC: u8 = 1;
+pub const KIND_PHONE: u8 = 2;
 
 pub const MAX_PLAINTEXT: usize = 1 << 20;
 pub const CHUNK: usize = 64 * 1024;
@@ -215,17 +225,19 @@ impl Channel {
 pub struct Hello {
     pub name: String,
     pub port: u16,
+    pub kind: u8,
 }
 
 pub fn hello_msg(name: &str, port: u16) -> Writer {
-    Writer::new(T_HELLO).str(name).u16(port).u32(0)
+    Writer::new(T_HELLO).str(name).u16(port).u32(KIND_PC as u32)
 }
 
 pub fn parse_hello(b: &[u8]) -> io::Result<Hello> {
     let mut r = Reader::new(b);
     let name = r.str()?;
     let port = r.u16()?;
-    Ok(Hello { name, port })
+    let kind = r.u32().map(|f| (f & 0xff) as u8).unwrap_or(0);
+    Ok(Hello { name, port, kind })
 }
 
 pub struct Established {
@@ -233,6 +245,8 @@ pub struct Established {
     pub peer_id: [u8; 16],
     /// Long-term key established by pairing (pair mode only).
     pub new_key: Option<[u8; 32]>,
+    /// Unpaired guest session.
+    pub guest: bool,
 }
 
 fn dh(sk: &[u8; 32], pk: &[u8; 32]) -> io::Result<[u8; 32]> {
@@ -263,6 +277,7 @@ fn split_keys(okm: &[u8]) -> ([u8; 32], [u8; 32]) {
 pub enum ClientAuth<'a> {
     Session(&'a [u8; 32]),
     Pair(&'a str),
+    Guest,
 }
 
 pub fn client_handshake(mut stream: TcpStream, my_id: &[u8; 16], auth: ClientAuth) -> io::Result<Established> {
@@ -270,6 +285,7 @@ pub fn client_handshake(mut stream: TcpStream, my_id: &[u8; 16], auth: ClientAut
     let mode = match auth {
         ClientAuth::Session(_) => MODE_SESSION,
         ClientAuth::Pair(_) => MODE_PAIR,
+        ClientAuth::Guest => MODE_GUEST,
     };
     let ch_bytes = hello_bytes(mode, my_id, &epk);
     stream.write_all(&ch_bytes)?;
@@ -282,6 +298,8 @@ pub fn client_handshake(mut stream: TcpStream, my_id: &[u8; 16], auth: ClientAut
         ST_OK => {}
         ST_UNKNOWN_PEER => return err("the other device does not know us any more - pair again"),
         ST_NOT_PAIRING => return err("the other device is not in pairing mode (or the code expired)"),
+        ST_NO_GUESTS => return err("the other device does not accept files from unpaired devices"),
+        ST_BUSY => return err("the other device has too many pending transfers - try again later"),
         s => return err(format!("handshake rejected (status {})", s)),
     }
     let mut peer_id = [0u8; 16];
@@ -294,6 +312,17 @@ pub fn client_handshake(mut stream: TcpStream, my_id: &[u8; 16], auth: ClientAut
     transcript.extend_from_slice(&sr);
 
     match auth {
+        ClientAuth::Guest => {
+            let mut okm = [0u8; 64];
+            hkdf(b"ferry/1 guest", &shared, &[b"ferry/1 guest".as_ref(), &transcript].concat(), &mut okm);
+            let (c2s, s2c) = split_keys(&okm);
+            Ok(Established {
+                ch: Channel { stream, send_key: c2s, recv_key: s2c, send_ctr: 0, recv_ctr: 0 },
+                peer_id,
+                new_key: None,
+                guest: true,
+            })
+        }
         ClientAuth::Session(key) => {
             let mut okm = [0u8; 64];
             hkdf(key, &shared, &[b"ferry/1 session".as_ref(), &transcript].concat(), &mut okm);
@@ -302,6 +331,7 @@ pub fn client_handshake(mut stream: TcpStream, my_id: &[u8; 16], auth: ClientAut
                 ch: Channel { stream, send_key: c2s, recv_key: s2c, send_ctr: 0, recv_ctr: 0 },
                 peer_id,
                 new_key: None,
+                guest: false,
             })
         }
         ClientAuth::Pair(code) => {
@@ -323,6 +353,7 @@ pub fn client_handshake(mut stream: TcpStream, my_id: &[u8; 16], auth: ClientAut
                 ch: Channel { stream, send_key: c2s, recv_key: s2c, send_ctr: 0, recv_ctr: 0 },
                 peer_id,
                 new_key: Some(lt),
+                guest: false,
             })
         }
     }
@@ -333,6 +364,10 @@ pub trait ServerCtx {
     /// Current pairing code (normalized) if a pairing window is open.
     fn pair_code(&self) -> Option<String>;
     fn pair_failed(&self);
+    /// ST_OK if an unpaired device at `ip` may open a guest session now.
+    fn guest_status(&self, _id: &[u8; 16], _ip: std::net::IpAddr) -> u8 {
+        ST_NO_GUESTS
+    }
 }
 
 pub fn server_handshake(mut stream: TcpStream, my_id: &[u8; 16], ctx: &dyn ServerCtx) -> io::Result<Established> {
@@ -373,6 +408,7 @@ pub fn server_handshake(mut stream: TcpStream, my_id: &[u8; 16], ctx: &dyn Serve
                 ch: Channel { stream, send_key: s2c, recv_key: c2s, send_ctr: 0, recv_ctr: 0 },
                 peer_id,
                 new_key: None,
+                guest: false,
             })
         }
         MODE_PAIR => {
@@ -402,6 +438,27 @@ pub fn server_handshake(mut stream: TcpStream, my_id: &[u8; 16], ctx: &dyn Serve
                 ch: Channel { stream, send_key: s2c, recv_key: c2s, send_ctr: 0, recv_ctr: 0 },
                 peer_id,
                 new_key: Some(lt),
+                guest: false,
+            })
+        }
+        MODE_GUEST => {
+            let ip = stream.peer_addr().map(|a| a.ip()).unwrap_or(std::net::IpAddr::from([0, 0, 0, 0]));
+            let st = ctx.guest_status(&peer_id, ip);
+            if st != ST_OK {
+                return reject(&stream, st);
+            }
+            let sr = hello_bytes(ST_OK, my_id, &epk);
+            stream.write_all(&sr)?;
+            let shared = dh(&esk, &cpk)?;
+            let transcript = [&chb[..], &sr[..]].concat();
+            let mut okm = [0u8; 64];
+            hkdf(b"ferry/1 guest", &shared, &[b"ferry/1 guest".as_ref(), &transcript].concat(), &mut okm);
+            let (c2s, s2c) = split_keys(&okm);
+            Ok(Established {
+                ch: Channel { stream, send_key: s2c, recv_key: c2s, send_ctr: 0, recv_ctr: 0 },
+                peer_id,
+                new_key: None,
+                guest: true,
             })
         }
         _ => reject(&stream, 255),
@@ -432,6 +489,59 @@ pub fn parse_disc(b: &[u8]) -> Option<([u8; 4], [u8; 16], u16)> {
     Some((m, id, u16::from_be_bytes([b[20], b[21]])))
 }
 
+/// v0.2 presence: "FRYP" = who is there? (also announces the sender), "FRYH" = here I am.
+/// magic | id[16] | tcp port u16 | kind u8 | flags u8 (bit0: accepts unpaired) | name len u8 | name
+pub const PRES_QUERY: &[u8; 4] = b"FRYP";
+pub const PRES_HERE: &[u8; 4] = b"FRYH";
+pub const PRES_GUESTS: u8 = 1;
+
+pub struct Presence {
+    pub magic: [u8; 4],
+    pub id: [u8; 16],
+    pub port: u16,
+    pub kind: u8,
+    pub flags: u8,
+    pub name: String,
+}
+
+pub fn presence_packet(magic: &[u8; 4], id: &[u8; 16], port: u16, kind: u8, flags: u8, name: &str) -> Vec<u8> {
+    let mut n = name.as_bytes().to_vec();
+    while n.len() > 64 || std::str::from_utf8(&n).is_err() {
+        n.pop();
+    }
+    let mut b = Vec::with_capacity(25 + n.len());
+    b.extend_from_slice(magic);
+    b.extend_from_slice(id);
+    b.extend_from_slice(&port.to_be_bytes());
+    b.push(kind);
+    b.push(flags);
+    b.push(n.len() as u8);
+    b.extend_from_slice(&n);
+    b
+}
+
+pub fn parse_presence(b: &[u8]) -> Option<Presence> {
+    if b.len() < 25 || (&b[..4] != PRES_QUERY && &b[..4] != PRES_HERE) {
+        return None;
+    }
+    let nl = b[24] as usize;
+    if b.len() < 25 + nl {
+        return None;
+    }
+    let mut magic = [0u8; 4];
+    magic.copy_from_slice(&b[..4]);
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&b[4..20]);
+    Some(Presence {
+        magic,
+        id,
+        port: u16::from_be_bytes([b[20], b[21]]),
+        kind: b[22],
+        flags: b[23],
+        name: String::from_utf8_lossy(&b[25..25 + nl]).to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,6 +563,49 @@ mod tests {
         fn pair_failed(&self) {
             self.fails.set(self.fails.get() + 1);
         }
+    }
+
+    struct GuestCtx;
+    impl ServerCtx for GuestCtx {
+        fn peer_key(&self, _: &[u8; 16]) -> Option<[u8; 32]> {
+            None
+        }
+        fn pair_code(&self) -> Option<String> {
+            None
+        }
+        fn pair_failed(&self) {}
+        fn guest_status(&self, _: &[u8; 16], _: std::net::IpAddr) -> u8 {
+            ST_OK
+        }
+    }
+
+    #[test]
+    fn guest_session_and_presence() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let srv = std::thread::spawn(move || {
+            let (s, _) = l.accept().unwrap();
+            let mut e = server_handshake(s, &[2; 16], &GuestCtx).unwrap();
+            assert!(e.guest);
+            let b = e.ch.expect(T_OFFER).unwrap();
+            assert_eq!(Reader::new(&b).u32().unwrap(), 1);
+            e.ch.ack(true, "").unwrap();
+            // a server that refuses guests
+            let (s, _) = l.accept().unwrap();
+            assert!(server_handshake(s, &[2; 16], &Ctx { key: [0; 32], code: None, fails: Cell::new(0) }).is_err());
+        });
+        let s = TcpStream::connect(addr).unwrap();
+        let mut e = client_handshake(s, &[1; 16], ClientAuth::Guest).unwrap();
+        e.ch.send(Writer::new(T_OFFER).u32(1).u64(5).u8(0)).unwrap();
+        e.ch.wait_ack().unwrap();
+        let s = TcpStream::connect(addr).unwrap();
+        let r = client_handshake(s, &[1; 16], ClientAuth::Guest);
+        assert!(r.err().unwrap().to_string().contains("unpaired"));
+        srv.join().unwrap();
+
+        let p = presence_packet(PRES_HERE, &[7; 16], 47800, KIND_PHONE, PRES_GUESTS, "Pixel ✓");
+        let q = parse_presence(&p).unwrap();
+        assert_eq!((q.port, q.kind, q.flags, q.name.as_str()), (47800, KIND_PHONE, PRES_GUESTS, "Pixel ✓"));
     }
 
     #[test]

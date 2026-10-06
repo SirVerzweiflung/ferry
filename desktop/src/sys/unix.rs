@@ -200,3 +200,37 @@ pub fn error_box(msg: &str) {
 }
 
 pub fn init_logging() {}
+
+/// Notification for a transfer waiting in Incoming, with Accept / Decline buttons when
+/// the notification server supports actions (libnotify >= 0.7.10, e.g. Ubuntu 24.04).
+/// Never a dialog: it just sits in the notification list.
+pub fn notify_incoming(title: &str, body: &str, on_choice: Box<dyn FnOnce(&str) + Send>) {
+    let (title, body) = (title.to_string(), body.to_string());
+    std::thread::spawn(move || {
+        if !have("notify-send") {
+            eprintln!("[incoming] {}: {}", title, body);
+            return;
+        }
+        let supports_actions = Command::new("notify-send")
+            .arg("--help")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("--action"))
+            .unwrap_or(false);
+        if !supports_actions {
+            notify(&title, &format!("{} Use the Ferry menu (or `ferry incoming`) to accept.", body));
+            return;
+        }
+        let out = Command::new("notify-send")
+            .args(["-a", "Ferry", "-i", "phone", "-u", "normal", "--wait"])
+            .args(["-A", "accept=Accept", "-A", "decline=Decline"])
+            .arg(&title)
+            .arg(&body)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output();
+        if let Ok(o) = out {
+            let choice = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            on_choice(&choice);
+        }
+    });
+}
