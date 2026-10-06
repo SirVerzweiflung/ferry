@@ -5,10 +5,8 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.os.Bundle;
 
-import dev.ferry.core.Peer;
-
 /**
- * Invisible activity that reads the clipboard and sends it to the default computer.
+ * Invisible activity that reads the clipboard and sends it to all my (paired) devices.
  * Android 10+ only lets the app that has window focus read the clipboard, so the
  * Quick Settings tile and the notification action route through here.
  */
@@ -27,8 +25,7 @@ public final class ClipSendActivity extends Activity {
         if (!hasFocus || done) return;
         done = true;
         FerryApp app = FerryApp.get(this);
-        Peer p = app.store.defaultPeer();
-        if (p == null) {
+        if (app.store.peers().isEmpty()) {
             app.toast("Pair Ferry with your computer first");
             finish();
             return;
@@ -40,7 +37,7 @@ public final class ClipSendActivity extends Activity {
         if (text == null || text.length() == 0) {
             app.toast("The clipboard is empty");
         } else {
-            app.sendClip(p, text.toString());
+            app.sendClip(text.toString()); // to all my devices
         }
         finish();
         overridePendingTransition(0, 0);

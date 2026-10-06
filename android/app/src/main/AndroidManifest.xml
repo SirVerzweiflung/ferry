@@ -26,6 +26,9 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
         </activity>
 
         <!-- Appears in the Android share sheet for any file(s) or text. -->
@@ -64,7 +67,7 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Waits for files and clipboard text sent from the user's paired computer on the local network." />
+                android:value="Waits for files and clipboard text sent from the user's computers on the local network." />
         </service>
 
         <service
@@ -77,6 +80,11 @@
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
             </intent-filter>
         </service>
+
+        <!-- Accept / Decline buttons on "wants to send you" notifications -->
+        <receiver
+            android:name=".app.IncomingReceiver"
+            android:exported="false" />
 
         <receiver
             android:name=".app.BootReceiver"

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Direct Share: paired devices appear as targets in the Android share sheet. -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <share-target android:targetClass="dev.ferry.app.ShareActivity">
+        <data android:mimeType="*/*" />
+        <category android:name="dev.ferry.SHARE_TARGET" />
+    </share-target>
+</shortcuts>

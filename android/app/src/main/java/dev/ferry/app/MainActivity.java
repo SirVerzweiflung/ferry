@@ -6,9 +6,9 @@ import android.app.AlertDialog;
 import android.app.StatusBarManager;
 import android.content.ComponentName;
 import android.content.Intent;
-import android.graphics.drawable.Icon;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
+import android.graphics.drawable.Icon;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -22,6 +22,7 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 
 import java.io.IOException;
@@ -29,17 +30,26 @@ import java.util.ArrayList;
 import java.util.List;
 
 import dev.ferry.R;
+import dev.ferry.core.Node;
 import dev.ferry.core.Peer;
 
-/** The only real screen: status, paired devices and a few buttons. */
+/**
+ * The only real screen:
+ *   Incoming (from unpaired devices, if any) - My devices - Nearby - a few buttons and settings.
+ */
 public final class MainActivity extends Activity implements FerryApp.Listener {
     private static final int REQ_PICK = 10;
 
     private FerryApp app;
-    private LinearLayout peersBox;
     private TextView info;
+    private LinearLayout incomingBox, mineBox, nearbyBox, queueBox;
     private Button batteryBtn;
+    private Switch visibleSwitch;
     private AlertDialog pairDialog;
+    /** Device chosen for the file picker that is open right now. */
+    private String pickHex, pickName;
+    private List<Node.Device> nearby = new ArrayList<>();
+    private boolean scanning;
 
     private int dp(int v) {
         return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, getResources().getDisplayMetrics());
@@ -51,6 +61,19 @@ public final class MainActivity extends Activity implements FerryApp.Listener {
         t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
         if (bold) t.setTypeface(Typeface.DEFAULT_BOLD);
         t.setPadding(0, dp(6), 0, dp(6));
+        return t;
+    }
+
+    private TextView heading(String s) {
+        TextView t = text(s, 18, true);
+        t.setPadding(0, dp(18), 0, dp(2));
+        return t;
+    }
+
+    private TextView hint(String s) {
+        TextView t = text(s, 13, false);
+        t.setAlpha(0.65f);
+        t.setPadding(0, 0, 0, dp(4));
         return t;
     }
 
@@ -66,35 +89,60 @@ public final class MainActivity extends Activity implements FerryApp.Listener {
         return b;
     }
 
+    private LinearLayout vbox() {
+        LinearLayout l = new LinearLayout(this);
+        l.setOrientation(LinearLayout.VERTICAL);
+        return l;
+    }
+
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         app = FerryApp.get(this);
 
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(20), dp(12), dp(20), dp(20));
+        LinearLayout root = vbox();
+        root.setPadding(dp(20), dp(8), dp(20), dp(24));
 
         info = text("", 15, false);
         info.setOnClickListener(v -> renameDialog());
         root.addView(info);
 
-        root.addView(text("Paired computers", 18, true));
-        peersBox = new LinearLayout(this);
-        peersBox.setOrientation(LinearLayout.VERTICAL);
-        root.addView(peersBox);
+        incomingBox = vbox();
+        root.addView(incomingBox);
 
-        root.addView(button("Pair with computer (enter code)", v -> enterCodeDialog()));
-        root.addView(button("Pair: show a code on this phone", v -> showCodeDialog()));
-        root.addView(button("Send clipboard", v ->
+        root.addView(heading("My devices"));
+        root.addView(hint("Paired with a code. Files arrive directly and the clipboard is shared between all of them."));
+        mineBox = vbox();
+        root.addView(mineBox);
+        root.addView(button("Send clipboard to my devices", v ->
                 startActivity(new Intent(this, ClipSendActivity.class))));
-        root.addView(button("Send files…", v -> {
-            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT)
-                    .addCategory(Intent.CATEGORY_OPENABLE)
-                    .setType("*/*")
-                    .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-            startActivityForResult(i, REQ_PICK);
-        }));
+        root.addView(button("Pair with a computer (enter its code)", v -> enterCodeDialog()));
+        root.addView(button("Pair: show a code on this phone", v -> showCodeDialog()));
+
+        root.addView(heading("Nearby"));
+        root.addView(hint("Other Ferry devices on this network. What you send them waits until they accept it."));
+        nearbyBox = vbox();
+        root.addView(nearbyBox);
+        root.addView(button("Look again", v -> scan()));
+
+        queueBox = vbox();
+        root.addView(queueBox);
+
+        root.addView(heading("Settings"));
+        visibleSwitch = new Switch(this);
+        visibleSwitch.setText("Visible to nearby devices");
+        visibleSwitch.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        visibleSwitch.setPadding(0, dp(8), 0, dp(4));
+        visibleSwitch.setOnCheckedChangeListener((b, on) -> {
+            if (on == app.store.visible()) return;
+            app.store.setVisible(on);
+            app.io.execute(() -> app.node.sendPresence(false)); // tell others right away
+            FerryService.refresh(this);
+        });
+        root.addView(visibleSwitch);
+        root.addView(hint("When on, unpaired devices can see this phone and send to it. Their files wait in "
+                + "Incoming until you accept them, and are deleted after 24 hours otherwise."));
+
         batteryBtn = button("Allow Ferry to run in the background", v -> {
             Intent i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
                     Uri.parse("package:" + getPackageName()));
@@ -108,14 +156,19 @@ public final class MainActivity extends Activity implements FerryApp.Listener {
         if (Build.VERSION.SDK_INT >= 33) {
             root.addView(button("Add \"Clipboard → PC\" to Quick Settings", v -> requestTile()));
         }
+        if (app.store.blockedCount() > 0) {
+            root.addView(button("Unblock all blocked devices", v -> {
+                app.store.unblockAll();
+                app.toast("Unblocked");
+                v.setVisibility(View.GONE);
+            }));
+        }
 
-        TextView help = text("Tips:\n• Share any file or text from another app → \"Send to desktop\".\n"
-                + "• Add the \"Clipboard → PC\" tile to Quick Settings for one-tap clipboard sending.\n"
-                + "• Text copied on the computer appears on this phone automatically.\n"
+        TextView help = hint("\nTips:\n• Share any file or text from another app → Ferry. Your paired computers also "
+                + "appear directly in the share sheet.\n"
+                + "• Text copied on a paired computer appears on this phone automatically.\n"
                 + "• Received files are saved in Download/Ferry.\n"
-                + "• Tap the device name above to rename this phone.", 13, false);
-        help.setAlpha(0.7f);
-        help.setPadding(0, dp(18), 0, 0);
+                + "• Tap the name at the top to rename this phone.");
         root.addView(help);
 
         ScrollView sv = new ScrollView(this);
@@ -133,7 +186,9 @@ public final class MainActivity extends Activity implements FerryApp.Listener {
     protected void onResume() {
         super.onResume();
         app.addListener(this);
+        app.scheduleExpiry();
         refresh();
+        scan();
     }
 
     @Override
@@ -142,34 +197,145 @@ public final class MainActivity extends Activity implements FerryApp.Listener {
         super.onPause();
     }
 
+    private void scan() {
+        if (scanning) return;
+        scanning = true;
+        app.io.execute(() -> {
+            List<Node.Device> devs = app.node.devices(true);
+            runOnUiThread(() -> {
+                scanning = false;
+                nearby = devs;
+                refresh();
+            });
+        });
+    }
+
     private void refresh() {
         List<String> addrs = FerryApp.localAddresses();
         info.setText("This phone: " + app.store.name() + "  ✎\nAddress: "
                 + (addrs.isEmpty() ? "no network" : String.join(", ", addrs)) + "  (port " + app.store.port() + ")");
-        peersBox.removeAllViews();
+        visibleSwitch.setChecked(app.store.visible());
+
+        // Incoming
+        incomingBox.removeAllViews();
+        List<Inbox.Item> items = app.inbox.list();
+        if (!items.isEmpty()) {
+            incomingBox.addView(heading("Incoming (" + items.size() + ")"));
+            incomingBox.addView(hint("From devices that are not paired. Deleted after 24 h unless you accept."));
+            for (Inbox.Item it : items) {
+                incomingBox.addView(text(it.fromName + " sent " + it.summary(), 15, false));
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                Button acc = button("Accept", v -> app.accept(it.id));
+                Button dec = button("Decline", v -> app.decline(it.id));
+                Button blk = button("Block", v -> new AlertDialog.Builder(this)
+                        .setMessage("Decline and never accept anything from " + it.fromName + " again?")
+                        .setPositiveButton("Block", (d, w) -> app.block(it.id))
+                        .setNegativeButton("Cancel", null)
+                        .show());
+                for (Button b : new Button[] {acc, dec, blk}) {
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1);
+                    lp.rightMargin = dp(4);
+                    b.setLayoutParams(lp);
+                    row.addView(b);
+                }
+                incomingBox.addView(row);
+            }
+        }
+
+        // My devices
+        mineBox.removeAllViews();
         List<Peer> peers = app.store.peers();
         if (peers.isEmpty()) {
-            TextView t = text("None yet. On the computer click the Ferry icon → \"Pair new phone…\", "
-                    + "then tap \"Pair with computer\" here.", 14, false);
-            t.setAlpha(0.7f);
-            peersBox.addView(t);
+            mineBox.addView(hint("None yet. On the computer click the Ferry icon → \"Pair a new device…\", "
+                    + "then tap \"Pair with a computer\" below."));
         }
         for (int i = 0; i < peers.size(); i++) {
             Peer p = peers.get(i);
-            TextView t = text((i == 0 ? "★ " : "• ") + p.name + (p.addr != null ? "   " + p.addr : ""), 15, false);
+            boolean online = false;
+            for (Node.Device d : nearby) if (d.paired && d.idHex().equals(p.idHex())) online = d.online;
+            TextView t = text((i == 0 ? "★ " : "• ") + p.name + "   " + FerryApp.kindLabel(p.kind)
+                    + (online ? " · online" : ""), 16, false);
+            final boolean isMain = i == 0;
+            t.setOnClickListener(v -> deviceMenu(p, isMain));
+            mineBox.addView(t);
+        }
+
+        // Nearby
+        nearbyBox.removeAllViews();
+        int n = 0;
+        for (Node.Device d : nearby) {
+            if (d.paired) continue;
+            n++;
+            TextView t = text("• " + d.name + "   " + FerryApp.kindLabel(d.kind), 16, false);
             t.setOnClickListener(v -> new AlertDialog.Builder(this)
-                    .setTitle(p.name)
-                    .setMessage("Forget this computer? You will need to pair again.")
-                    .setPositiveButton("Forget", (d, w) -> {
-                        app.store.remove(p.id);
-                        refresh();
-                    })
+                    .setTitle(d.name)
+                    .setMessage(d.name + " is not paired. What you send waits there until it is accepted.")
+                    .setPositiveButton("Send files…", (dd, w) -> pickFor(d.idHex(), d.name))
                     .setNegativeButton("Cancel", null)
                     .show());
-            peersBox.addView(t);
+            nearbyBox.addView(t);
         }
+        if (n == 0) nearbyBox.addView(hint(scanning ? "Looking…" : "None found."));
+
+        // Queue
+        queueBox.removeAllViews();
+        List<String> q = app.node.queueDescriptions();
+        if (!q.isEmpty()) {
+            queueBox.addView(heading("Waiting to send"));
+            queueBox.addView(hint("These devices are not reachable right now. Ferry sends as soon as they are back."));
+            for (String s : q) queueBox.addView(text("• " + s, 15, false));
+            queueBox.addView(button("Cancel all", v -> {
+                app.node.cancelQueue();
+                refresh();
+            }));
+        }
+
         PowerManager pm = getSystemService(PowerManager.class);
         batteryBtn.setVisibility(pm.isIgnoringBatteryOptimizations(getPackageName()) ? View.GONE : View.VISIBLE);
+    }
+
+    private void deviceMenu(Peer p, boolean isMain) {
+        List<String> opts = new ArrayList<>();
+        opts.add("Send files…");
+        opts.add("Send clipboard");
+        if (!isMain) opts.add("Make main device (★)");
+        opts.add("Forget this device");
+        new AlertDialog.Builder(this)
+                .setTitle(p.name)
+                .setItems(opts.toArray(new String[0]), (d, w) -> {
+                    String o = opts.get(w);
+                    if (o.startsWith("Send files")) {
+                        pickFor(p.idHex(), p.name);
+                    } else if (o.startsWith("Send clipboard")) {
+                        startActivity(new Intent(this, ClipSendActivity.class));
+                    } else if (o.startsWith("Make main")) {
+                        app.store.makeMain(p.id);
+                        app.updateShortcuts();
+                        refresh();
+                    } else {
+                        new AlertDialog.Builder(this)
+                                .setMessage("Forget " + p.name + "? You will need to pair again.")
+                                .setPositiveButton("Forget", (dd, ww) -> {
+                                    app.store.remove(p.id);
+                                    app.updateShortcuts();
+                                    refresh();
+                                })
+                                .setNegativeButton("Cancel", null)
+                                .show();
+                    }
+                })
+                .show();
+    }
+
+    private void pickFor(String hex, String name) {
+        pickHex = hex;
+        pickName = name;
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("*/*")
+                .putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        startActivityForResult(i, REQ_PICK);
     }
 
     @Override
@@ -208,8 +374,7 @@ public final class MainActivity extends Activity implements FerryApp.Listener {
     }
 
     private void enterCodeDialog() {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout box = vbox();
         box.setPadding(dp(20), dp(8), dp(20), 0);
         EditText addr = field("Computer address, e.g. 192.168.1.20", InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         EditText code = field("Code, e.g. 7KQ2M-X9PRT", InputType.TYPE_CLASS_TEXT
@@ -220,8 +385,8 @@ public final class MainActivity extends Activity implements FerryApp.Listener {
         box.addView(addr);
         box.addView(code);
         new AlertDialog.Builder(this)
-                .setTitle("Pair with computer")
-                .setMessage("On the computer: Ferry icon in the top bar → \"Pair new phone…\" (or run: ferry pair).")
+                .setTitle("Pair with a computer")
+                .setMessage("On the computer: Ferry icon → \"Pair a new device…\" (or run: ferry pair).")
                 .setView(box)
                 .setPositiveButton("Pair", (d, w) -> {
                     String a = addr.getText().toString().trim();
@@ -286,19 +451,24 @@ public final class MainActivity extends Activity implements FerryApp.Listener {
     @Override
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
-        if (req != REQ_PICK || res != RESULT_OK || data == null) return;
-        ArrayList<Uri> uris = new ArrayList<>();
+        if (req != REQ_PICK || res != RESULT_OK || data == null || pickHex == null) return;
+        List<Uri> uris = new ArrayList<>();
         if (data.getClipData() != null) {
             for (int i = 0; i < data.getClipData().getItemCount(); i++) uris.add(data.getClipData().getItemAt(i).getUri());
         } else if (data.getData() != null) {
             uris.add(data.getData());
         }
-        if (uris.isEmpty()) return;
-        Intent i = new Intent(this, ShareActivity.class)
-                .setAction(Intent.ACTION_SEND_MULTIPLE)
-                .setType("*/*")
-                .putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        startActivity(i);
+        String hex = pickHex, name = pickName;
+        app.io.execute(() -> {
+            List<Node.Outgoing> files = new ArrayList<>();
+            for (Uri u : uris) {
+                try {
+                    files.add(Sources.open(this, u));
+                } catch (IOException | RuntimeException e) {
+                    app.toast("Cannot read a file: " + e.getMessage());
+                }
+            }
+            if (!files.isEmpty()) app.sendFiles(hex, name, files);
+        });
     }
 }

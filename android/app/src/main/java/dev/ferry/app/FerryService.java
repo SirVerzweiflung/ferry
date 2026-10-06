@@ -49,7 +49,9 @@ public final class FerryService extends Service {
         int n = app.store.peers().size();
         return app.builder(FerryApp.CH_SERVICE)
                 .setContentTitle(n == 0 ? "Ferry - not paired yet" : "Ferry is ready")
-                .setContentText(n == 0 ? "Open the app to pair with your computer" : "Waiting for files and clipboard")
+                .setContentText(n == 0 ? "Open the app to pair with your computer"
+                        : app.store.visible() ? "Waiting for files - visible to nearby devices"
+                        : "Waiting for files from my devices")
                 .setContentIntent(openApp)
                 .setOngoing(true)
                 .setShowWhen(false)
@@ -132,14 +134,16 @@ public final class FerryService extends Service {
         try {
             udp = new DatagramSocket(null);
             udp.setReuseAddress(true);
+            udp.setBroadcast(true);
             udp.bind(new InetSocketAddress(port));
+            app.node.setUdpSocket(udp);
             Thread u = new Thread(() -> {
                 byte[] buf = new byte[64];
                 while (!stopping) {
                     try {
                         DatagramPacket p = new DatagramPacket(buf, buf.length);
                         udp.receive(p);
-                        app.node.answerDiscovery(udp, p);
+                        app.node.handleUdp(udp, p);
                     } catch (IOException e) {
                         if (udp.isClosed()) return;
                     }

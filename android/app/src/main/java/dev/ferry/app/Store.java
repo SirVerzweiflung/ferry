@@ -7,17 +7,20 @@ import android.provider.Settings;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import dev.ferry.core.Crypto;
 import dev.ferry.core.Peer;
 import dev.ferry.core.Proto;
 
-/** Settings, identity and paired devices (SharedPreferences, app-private). */
+/** Settings, identity, paired devices and blocked devices (SharedPreferences, app-private). */
 final class Store {
     private final SharedPreferences sp;
     private final Context ctx;
-    private byte[] id;
+    private final byte[] id;
+    /** Paired devices; index 0 = main device (most recently paired). */
     private final List<Peer> peers = new ArrayList<>();
 
     Store(Context c) {
@@ -59,25 +62,59 @@ final class Store {
         return Proto.DEFAULT_PORT;
     }
 
+    /** Visible to unpaired devices on the network (they can send to Incoming). */
+    boolean visible() {
+        return sp.getBoolean("visible", true);
+    }
+
+    void setVisible(boolean v) {
+        sp.edit().putBoolean("visible", v).apply();
+    }
+
+    long incomingLimitBytes() {
+        return 2048L * 1_000_000L;
+    }
+
+    long incomingHours() {
+        return 24;
+    }
+
+    // ------------------------------------------------------------ paired devices
+
     synchronized List<Peer> peers() {
         return new ArrayList<>(peers);
     }
 
-    synchronized Peer defaultPeer() {
+    synchronized Peer mainPeer() {
         return peers.isEmpty() ? null : peers.get(0);
     }
 
+    synchronized Peer find(String idHex) {
+        for (Peer p : peers) if (p.idHex().equals(idHex)) return p;
+        return null;
+    }
+
+    /** New pairing: becomes the main device. */
     synchronized void savePeer(Peer p) {
         removeLocked(p.id);
         peers.add(0, p);
         persist();
     }
 
-    synchronized void touch(byte[] pid, String name, String addr) {
+    synchronized void makeMain(byte[] pid) {
         for (int i = 0; i < peers.size(); i++) {
-            Peer p = peers.get(i);
+            if (Arrays.equals(peers.get(i).id, pid)) {
+                peers.add(0, peers.remove(i));
+                persist();
+                return;
+            }
+        }
+    }
+
+    synchronized void touch(byte[] pid, String name, String addr, int kind) {
+        for (Peer p : peers) {
             if (Arrays.equals(p.id, pid)) {
-                boolean changed = i != 0;
+                boolean changed = false;
                 if (name != null && !name.isEmpty() && !name.equals(p.name)) {
                     p.name = name;
                     changed = true;
@@ -86,11 +123,11 @@ final class Store {
                     p.addr = addr;
                     changed = true;
                 }
-                if (changed) {
-                    peers.remove(i);
-                    peers.add(0, p);
-                    persist();
+                if (kind != 0 && kind != p.kind) {
+                    p.kind = kind;
+                    changed = true;
                 }
+                if (changed) persist();
                 return;
             }
         }
@@ -109,5 +146,27 @@ final class Store {
         StringBuilder b = new StringBuilder();
         for (Peer p : peers) b.append(p.serialize()).append('\n');
         sp.edit().putString("peers", b.toString()).apply();
+    }
+
+    // ------------------------------------------------------------ blocked unpaired devices
+
+    synchronized boolean isBlocked(byte[] pid, String ip) {
+        Set<String> b = sp.getStringSet("blocked", new HashSet<>());
+        return b.contains("id:" + Crypto.hex(pid)) || (ip != null && !ip.isEmpty() && b.contains("ip:" + ip));
+    }
+
+    synchronized void block(String idHex, String ip) {
+        Set<String> b = new HashSet<>(sp.getStringSet("blocked", new HashSet<>()));
+        b.add("id:" + idHex);
+        if (ip != null && !ip.isEmpty()) b.add("ip:" + ip);
+        sp.edit().putStringSet("blocked", b).apply();
+    }
+
+    synchronized int blockedCount() {
+        return sp.getStringSet("blocked", new HashSet<>()).size();
+    }
+
+    synchronized void unblockAll() {
+        sp.edit().remove("blocked").apply();
     }
 }
