@@ -15,9 +15,14 @@ public final class Proto {
 
     public static final byte[] MAGIC = {'F', 'R', 'Y', '1'};
     public static final int DEFAULT_PORT = 47800;
-    public static final int MODE_SESSION = 1, MODE_PAIR = 2;
-    public static final int ST_OK = 0, ST_UNKNOWN_PEER = 1, ST_NOT_PAIRING = 2;
-    public static final int T_HELLO = 1, T_CLIP = 2, T_FILE = 3, T_DATA = 4, T_ACK = 5, T_BYE = 6;
+    /** MODE_GUEST (v0.2): unpaired "nearby" device; the receiver keeps everything in Incoming. */
+    public static final int MODE_SESSION = 1, MODE_PAIR = 2, MODE_GUEST = 3;
+    public static final int ST_OK = 0, ST_UNKNOWN_PEER = 1, ST_NOT_PAIRING = 2, ST_NO_GUESTS = 3, ST_BUSY = 4;
+    public static final int T_HELLO = 1, T_CLIP = 2, T_FILE = 3, T_DATA = 4, T_ACK = 5, T_BYE = 6, T_OFFER = 7;
+    public static final int KIND_PC = 1, KIND_PHONE = 2;
+    public static final byte[] PRES_QUERY = {'F', 'R', 'Y', 'P'};
+    public static final byte[] PRES_HERE = {'F', 'R', 'Y', 'H'};
+    public static final int PRES_GUESTS = 1;
     public static final int MAX_PLAINTEXT = 1 << 20;
     public static final int CHUNK = 64 * 1024;
     public static final int MAX_CLIP = 1 << 19;
@@ -28,6 +33,7 @@ public final class Proto {
 
     private static final byte[] INFO_SESSION = "ferry/1 session".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] INFO_PAIR = "ferry/1 pair".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] INFO_GUEST = "ferry/1 guest".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] CLIENT = "client".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] SERVER = "server".getBytes(StandardCharsets.US_ASCII);
 
@@ -254,33 +260,46 @@ public final class Proto {
         public final Channel ch;
         public final byte[] peerId;
         public final byte[] newKey; // non-null after pairing
+        public final boolean guest;
 
         Established(Channel ch, byte[] peerId, byte[] newKey) {
+            this(ch, peerId, newKey, false);
+        }
+
+        Established(Channel ch, byte[] peerId, byte[] newKey, boolean guest) {
             this.ch = ch;
             this.peerId = peerId;
             this.newKey = newKey;
+            this.guest = guest;
         }
     }
 
     public static final class Hello {
         public final String name;
         public final int port;
+        public final int kind;
 
-        Hello(String n, int p) {
+        Hello(String n, int p, int k) {
             name = n;
             port = p;
+            kind = k;
         }
     }
 
     public static Writer helloMsg(String name, int port) {
-        return new Writer(T_HELLO).str(name).u16(port).u32(0);
+        return new Writer(T_HELLO).str(name).u16(port).u32(KIND_PHONE);
     }
 
     public static Hello parseHello(Msg m) throws ProtoException {
         Reader r = m.reader();
         String n = r.str();
         int p = r.u16();
-        return new Hello(n, p);
+        int k = 0;
+        try {
+            k = (int) (r.u32() & 0xff);
+        } catch (ProtoException ignored) { // v0.1 peers may omit it
+        }
+        return new Hello(n, p, k);
     }
 
     private static byte[] helloBytes(int tag, byte[] id, byte[] eph) {
@@ -304,13 +323,16 @@ public final class Proto {
         return b;
     }
 
-    /** @param sessionKey long-term key for MODE_SESSION, or null when pairing with {@code code}. */
+    /**
+     * @param sessionKey long-term key for MODE_SESSION; null with a {@code code} = pairing;
+     *                   both null = guest session with an unpaired device.
+     */
     public static Established clientHandshake(Socket s, byte[] myId, byte[] sessionKey, String code)
             throws IOException {
         DataInputStream in = new DataInputStream(new java.io.BufferedInputStream(s.getInputStream(), 1 << 17));
         OutputStream out = new java.io.BufferedOutputStream(s.getOutputStream(), 1 << 17);
         byte[][] kp = Crypto.x25519Keypair();
-        int mode = sessionKey != null ? MODE_SESSION : MODE_PAIR;
+        int mode = sessionKey != null ? MODE_SESSION : code != null ? MODE_PAIR : MODE_GUEST;
         byte[] ch = helloBytes(mode, myId, kp[1]);
         out.write(ch);
         out.flush();
@@ -323,12 +345,21 @@ public final class Proto {
                 throw new ProtoException("the other device does not know this phone any more - pair again");
             case ST_NOT_PAIRING:
                 throw new ProtoException("the other device is not in pairing mode (or the code expired)");
+            case ST_NO_GUESTS:
+                throw new ProtoException("the other device does not accept files from unpaired devices");
+            case ST_BUSY:
+                throw new ProtoException("the other device has too many pending transfers - try again later");
             default:
                 throw new ProtoException("handshake rejected (" + sr[4] + ")");
         }
         byte[] peerId = Arrays.copyOfRange(sr, 5, 21);
         byte[] shared = dh(kp[0], Arrays.copyOfRange(sr, 21, 53));
         byte[] transcript = Crypto.concat(ch, sr);
+        if (mode == MODE_GUEST) {
+            byte[] okm = Crypto.hkdf(INFO_GUEST, shared, Crypto.concat(INFO_GUEST, transcript), 64);
+            return new Established(new Channel(s, in, out, Arrays.copyOfRange(okm, 0, 32),
+                    Arrays.copyOfRange(okm, 32, 64)), peerId, null, true);
+        }
         if (sessionKey != null) {
             byte[] okm = Crypto.hkdf(sessionKey, shared, Crypto.concat(INFO_SESSION, transcript), 64);
             return new Established(new Channel(s, in, out, Arrays.copyOfRange(okm, 0, 32),
@@ -359,6 +390,11 @@ public final class Proto {
         String pairCode();
 
         void pairFailed();
+
+        /** ST_OK if an unpaired device may open a guest session now. */
+        default int guestStatus(byte[] id, java.net.InetAddress ip) {
+            return ST_NO_GUESTS;
+        }
     }
 
     public static Established serverHandshake(Socket s, byte[] myId, ServerCtx ctx) throws IOException {
@@ -406,6 +442,20 @@ public final class Proto {
             return new Established(new Channel(s, in, out, Arrays.copyOfRange(okm, 96, 128),
                     Arrays.copyOfRange(okm, 64, 96)), peerId, Arrays.copyOfRange(okm, 32, 64));
         }
+        if (mode == MODE_GUEST) {
+            int st = ctx.guestStatus(peerId, s.getInetAddress());
+            if (st != ST_OK) {
+                reject(out, st);
+                throw new ProtoException("guest refused (" + st + ")");
+            }
+            byte[] sr = helloBytes(ST_OK, myId, kp[1]);
+            out.write(sr);
+            out.flush();
+            byte[] shared = dh(kp[0], cpk);
+            byte[] okm = Crypto.hkdf(INFO_GUEST, shared, Crypto.concat(INFO_GUEST, ch, sr), 64);
+            return new Established(new Channel(s, in, out, Arrays.copyOfRange(okm, 32, 64),
+                    Arrays.copyOfRange(okm, 0, 32)), peerId, null, true);
+        }
         reject(out, 255);
         throw new ProtoException("bad mode");
     }
@@ -422,6 +472,49 @@ public final class Proto {
     }
 
     // ------------------------------------------------------------ discovery
+
+    /** v0.2 presence: magic | id[16] | port u16 | kind u8 | flags u8 | name len u8 | name. */
+    public static final class Presence {
+        public final byte[] magic, id;
+        public final int port, kind, flags;
+        public final String name;
+
+        Presence(byte[] magic, byte[] id, int port, int kind, int flags, String name) {
+            this.magic = magic;
+            this.id = id;
+            this.port = port;
+            this.kind = kind;
+            this.flags = flags;
+            this.name = name;
+        }
+    }
+
+    public static byte[] presencePacket(byte[] magic, byte[] id, int port, int kind, int flags, String name) {
+        String nm = name;
+        while (nm.getBytes(StandardCharsets.UTF_8).length > 64) nm = nm.substring(0, nm.length() - 1);
+        byte[] n = nm.getBytes(StandardCharsets.UTF_8);
+        int len = n.length;
+        byte[] b = new byte[25 + len];
+        System.arraycopy(magic, 0, b, 0, 4);
+        System.arraycopy(id, 0, b, 4, 16);
+        b[20] = (byte) (port >>> 8);
+        b[21] = (byte) port;
+        b[22] = (byte) kind;
+        b[23] = (byte) flags;
+        b[24] = (byte) len;
+        System.arraycopy(n, 0, b, 25, len);
+        return b;
+    }
+
+    public static Presence parsePresence(byte[] b, int len) {
+        if (len < 25) return null;
+        byte[] m = Arrays.copyOf(b, 4);
+        if (!Arrays.equals(m, PRES_QUERY) && !Arrays.equals(m, PRES_HERE)) return null;
+        int nl = b[24] & 0xff;
+        if (len < 25 + nl) return null;
+        return new Presence(m, Arrays.copyOfRange(b, 4, 20), ((b[20] & 0xff) << 8) | (b[21] & 0xff),
+                b[22] & 0xff, b[23] & 0xff, new String(b, 25, nl, StandardCharsets.UTF_8));
+    }
 
     public static byte[] discPacket(byte[] magic, byte[] id, int port) {
         byte[] b = new byte[22];

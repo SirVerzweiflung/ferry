@@ -106,8 +106,8 @@ public class CoreTest {
         public int listenPort() { return port; }
         public List<Peer> peers() { return peers; }
         public void savePeer(Peer p) { peers.removeIf(x -> Arrays.equals(x.id, p.id)); peers.add(0, p); }
-        public void touchPeer(byte[] i, String n, String addr) {
-            for (Peer p : peers) if (Arrays.equals(p.id, i)) { p.name = n; if (addr != null) p.addr = addr; }
+        public void touchPeer(byte[] i, String n, String addr, int kind) {
+            for (Peer p : peers) if (Arrays.equals(p.id, i)) { p.name = n; if (addr != null) p.addr = addr; if (kind != 0) p.kind = kind; }
         }
         public void onPaired(Peer p) { events.add("paired " + p.name); }
         public void onPairingClosed(String r) { events.add("pairclosed " + r); }
@@ -126,6 +126,33 @@ public class CoreTest {
             for (Node.Incoming i : files) events.add("file " + i.displayName());
         }
         public void log(String m) { System.out.println("  [phone] " + m); }
+
+        // v0.2
+        volatile boolean visible = true;
+        final List<String> incoming = new CopyOnWriteArrayList<>();
+        public boolean visible() { return visible; }
+        public boolean isBlocked(byte[] id, String ip) { return false; }
+        public boolean hasIncomingRoom(byte[] id, String ip) { return incoming.size() < 10; }
+        public long incomingFreeBytes() { return 50_000_000L; }
+        public void onQueuedResult(String title, String msg) { events.add("queued-result " + title + ": " + msg); }
+        public void onChanged() {}
+        public Node.GuestTransfer beginGuest(String fromName, byte[] fromId, String ip) throws IOException {
+            Path gdir = Files.createTempDirectory(dir, "incoming-");
+            List<String> names = new ArrayList<>();
+            String[] text = {null};
+            return new Node.GuestTransfer() {
+                public OutputStream file(String name, long size) throws IOException { names.add(name); return Files.newOutputStream(gdir.resolve(name)); }
+                public void fileDone() {}
+                public void text(String t) { text[0] = t; }
+                public boolean isEmpty() { return names.isEmpty() && text[0] == null; }
+                public void commit() {
+                    String what = names.isEmpty() ? "text " + text[0] : String.join(",", names);
+                    incoming.add(gdir.toString());
+                    events.add("incoming " + fromName + " " + what);
+                }
+                public void discard() {}
+            };
+        }
     }
 
     /**
@@ -136,6 +163,10 @@ public class CoreTest {
      *   sendclip <text>
      *   expect <prefix>        -> wait for an event
      */
+    static Node.Outgoing fileOut(File file) {
+        return new Node.Outgoing(file.getName(), file.length(), () -> new FileInputStream(file), null);
+    }
+
     static void interop(String[] a) throws Exception {
         Path dir = Paths.get(a[1]);
         int port = Integer.parseInt(a[2]);
@@ -155,13 +186,17 @@ public class CoreTest {
         t.setDaemon(true);
         t.start();
         DatagramSocket udp = new DatagramSocket(port);
+        udp.setBroadcast(true);
+        node.setUdpSocket(udp);
+        String extra = System.getenv("FERRY_DISCOVERY_PORTS");
+        if (extra != null) for (String x : extra.split(",")) Node.EXTRA_DISCOVERY_PORTS.add(Integer.parseInt(x.trim()));
         Thread u = new Thread(() -> {
             byte[] buf = new byte[64];
             while (true) {
                 try {
                     DatagramPacket p = new DatagramPacket(buf, buf.length);
                     udp.receive(p);
-                    node.answerDiscovery(udp, p);
+                    node.handleUdp(udp, p);
                 } catch (IOException e) {
                     return;
                 }
@@ -185,16 +220,35 @@ public class CoreTest {
                         System.out.println("OK paired " + p.name);
                         break;
                     }
-                    case "sendfile": {
+                    case "sendfile": { // to my main device
                         File file = new File(f[1]);
-                        node.sendFiles(host.peers.get(0), List.of(new Node.Outgoing(file.getName(), file.length(),
-                                new FileInputStream(file))), null);
-                        System.out.println("OK sent");
+                        Peer p = host.peers.get(0);
+                        Node.Result r = node.send(p.idHex(), p.name, List.of(fileOut(file)), null, null);
+                        System.out.println(r.status == Node.Result.SENT ? "OK sent" : r.status == Node.Result.QUEUED ? "OK queued" : "FAIL " + r.message);
+                        break;
+                    }
+                    case "sendto": { // sendto <device name> <file>  (paired or nearby)
+                        String[] g = f[1].split(" ", 2);
+                        Node.Device d = null;
+                        for (Node.Device x : node.devices(true)) if (x.name.equals(g[0])) d = x;
+                        if (d == null) { System.out.println("FAIL no device " + g[0]); break; }
+                        Node.Result r = node.send(d.idHex(), d.name, List.of(fileOut(new File(g[1]))), null, null);
+                        System.out.println((r.status == Node.Result.REFUSED ? "FAIL " : "OK ") + r.message);
+                        break;
+                    }
+                    case "devices": {
+                        StringBuilder b = new StringBuilder("OK");
+                        for (Node.Device d : node.devices(true)) b.append(' ').append(d.name).append(d.paired ? "(mine)" : "(nearby)");
+                        System.out.println(b);
                         break;
                     }
                     case "sendclip":
-                        node.sendClip(host.peers.get(0), f[1].replace("\\n", "\n"));
+                        node.sendClipAll(f[1].replace("\\n", "\n"));
                         System.out.println("OK clip");
+                        break;
+                    case "unpairall":
+                        host.peers.clear();
+                        System.out.println("OK");
                         break;
                     case "breakaddr":
                         host.peers.get(0).addr = "10.255.255.1:" + f[1];
