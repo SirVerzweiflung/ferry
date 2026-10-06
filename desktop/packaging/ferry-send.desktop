@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Send to Phone
+Comment=Send files to your phone with Ferry
+Exec=ferry-send %F
+Icon=phone
+Terminal=false
+Categories=Utility;Network;
+Keywords=ferry;phone;android;share;send;
+Actions=clipboard;
+
+[Desktop Action clipboard]
+Name=Send clipboard to phone
+Exec=ferry clip

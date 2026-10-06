@@ -1,0 +1,8 @@
+#!/bin/sh
+# Used by the app launcher and the Nautilus "Scripts" menu.
+FERRY="$HOME/.local/bin/ferry"
+[ -x "$FERRY" ] || FERRY=ferry
+if [ "$#" -eq 0 ]; then
+    exec "$FERRY" send --pick
+fi
+exec "$FERRY" send "$@"

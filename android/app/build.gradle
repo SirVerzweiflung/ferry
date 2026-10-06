@@ -1,0 +1,48 @@
+plugins {
+    id 'com.android.application'
+}
+
+// The app has NO library dependencies - only the Android SDK.
+android {
+    namespace = 'dev.ferry'
+    compileSdk = 35
+
+    defaultConfig {
+        applicationId = 'dev.ferry'
+        minSdk = 29          // Android 10+
+        targetSdk = 34
+        versionCode = 1
+        versionName = '0.1.0'
+    }
+
+    signingConfigs {
+        release {
+            // Supplied by build.sh (auto-generated local keystore).
+            if (project.hasProperty('ferryKeystore')) {
+                storeFile = file(project.property('ferryKeystore'))
+                storePassword = project.property('ferryStorePass')
+                keyAlias = 'ferry'
+                keyPassword = project.property('ferryStorePass')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled = true
+            shrinkResources = true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig = project.hasProperty('ferryKeystore') ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError = false
+        checkReleaseBuilds = false
+    }
+}

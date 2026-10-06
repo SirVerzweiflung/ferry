@@ -1,0 +1,13 @@
+[Unit]
+Description=Ferry - file and clipboard sharing with your phone
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/ferry daemon
+Restart=on-failure
+RestartSec=3
+Nice=5
+
+[Install]
+WantedBy=graphical-session.target

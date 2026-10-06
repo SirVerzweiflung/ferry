@@ -1,0 +1,7 @@
+desktop/target/
+android/.gradle/
+android/app/build/
+android/build/
+android/local.properties
+android/Ferry.apk
+desktop/dist/

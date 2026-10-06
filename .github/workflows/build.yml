@@ -1,0 +1,38 @@
+# Optional: builds both apps on GitHub (push the repo, download artifacts from the Actions tab).
+# Note: CI-built APKs use a throw-away signing key; for updates build locally with android/build.sh.
+name: build
+on: [push, workflow_dispatch]
+jobs:
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cd desktop && cargo test --release && cargo build --release
+      - uses: actions/upload-artifact@v4
+        with: { name: ferry-desktop, path: desktop/target/release/ferry }
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cd desktop; cargo build --release
+      - uses: actions/upload-artifact@v4
+        with: { name: ferry-windows, path: "desktop/target/release/*.exe" }
+  windows-installer:
+    # Cross-compiles on Linux and builds dist/FerrySetup-<version>.exe with NSIS.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y mingw-w64 nsis
+      - run: desktop/package-windows.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: ferry-windows-installer, path: "desktop/dist/*.exe" }
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - run: android/core-test/run.sh
+      - run: android/build.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: ferry-apk, path: android/Ferry.apk }
