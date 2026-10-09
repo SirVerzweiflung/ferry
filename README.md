@@ -186,6 +186,7 @@ hole-punching of its own; that would need a relay server.
 cd desktop && cargo test --release              # RFC test vectors + protocol tests
 FERRY_WINCHECK=1 cargo check                     # type-check the Windows code from Linux
 android/core-test/run.sh                         # Java core vs RFC vectors and the JDK's own crypto
+python3 tests/core_loopback.py                   # two Android cores, platform and built-in cipher mixed
 python3 tests/interop.py                         # paired basics: desktop daemon <-> Android core
 python3 tests/desktop_v2.py                      # 4 desktops: nearby, accept/decline/block, queue, relay
 python3 tests/interop_v2.py                      # 3 desktops + phone core: relay, nearby both ways, queue

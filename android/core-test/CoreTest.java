@@ -219,6 +219,7 @@ public class CoreTest {
     }
 
     static void interop(String[] a) throws Exception {
+        if ("intree".equals(System.getenv("FERRY_AEAD"))) Aead.forceInTree = true;
         Path dir = Paths.get(a[1]);
         int port = Integer.parseInt(a[2]);
         MemHost host = new MemHost(dir, port);
@@ -310,6 +311,9 @@ public class CoreTest {
                         System.out.println(ev != null && ev.startsWith(f[1]) ? "OK " + ev : "FAIL got " + ev);
                         break;
                     }
+                    case "cipher":
+                        System.out.println(Aead.usingPlatform() ? "OK platform" : "OK built-in");
+                        break;
                     default:
                         System.out.println("FAIL unknown " + f[0]);
                 }
