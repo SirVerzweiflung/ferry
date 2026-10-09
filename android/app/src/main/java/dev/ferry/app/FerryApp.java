@@ -16,10 +16,12 @@ import android.content.pm.ShortcutInfo;
 import android.content.pm.ShortcutManager;
 import android.graphics.drawable.Icon;
 import android.net.Uri;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.provider.MediaStore;
 import android.util.Log;
 import android.webkit.MimeTypeMap;
@@ -63,6 +65,8 @@ public final class FerryApp extends Application implements Node.Host {
     final ExecutorService io = Executors.newCachedThreadPool();
     private Handler main;
     private NotificationManager nm;
+    private PowerManager.WakeLock sendWake;
+    private WifiManager.WifiLock sendWifi;
     private final AtomicInteger notifIds = new AtomicInteger(100);
     private final Runnable expiryTask = this::scheduleExpiry;
 
@@ -85,6 +89,8 @@ public final class FerryApp extends Application implements Node.Host {
         node = new Node(this);
         inbox = new Inbox(new File(getFilesDir(), "incoming"));
         nm = getSystemService(NotificationManager.class);
+        sendWake = getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ferry:send");
+        sendWifi = getSystemService(WifiManager.class).createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "ferry:send");
         NotificationChannel svc = new NotificationChannel(CH_SERVICE, "Background service",
                 NotificationManager.IMPORTANCE_MIN);
         svc.setDescription("Shown while Ferry waits for files from your computers. You can hide it.");
@@ -462,9 +468,38 @@ public final class FerryApp extends Application implements Node.Host {
         });
     }
 
+    /**
+     * Runs a send with the CPU and Wi-Fi kept out of power-save, like FerryService does for
+     * receiving. The wake lock times out by itself; the Wi-Fi lock is released in finally.
+     */
+    private Node.Result sendAwake(String targetHex, String targetName, List<Node.Outgoing> files, String text,
+                                  Node.Progress progress) {
+        boolean wake = false, wifi = false;
+        try {
+            try {
+                sendWake.acquire(30 * 60 * 1000L);
+                wake = true;
+                sendWifi.acquire();
+                wifi = true;
+            } catch (RuntimeException e) {
+                log("send locks: " + e);
+            }
+            return node.send(targetHex, targetName, files, text, progress);
+        } finally {
+            try {
+                if (wifi) sendWifi.release();
+            } catch (RuntimeException ignored) {
+            }
+            try {
+                if (wake && sendWake.isHeld()) sendWake.release();
+            } catch (RuntimeException ignored) {
+            }
+        }
+    }
+
     /** Text to one device (paired: its clipboard; nearby: waits in its Incoming). */
     void sendText(String targetHex, String targetName, String text) {
-        io.execute(() -> report(node.send(targetHex, targetName, null, text, null), targetName, -1));
+        io.execute(() -> report(sendAwake(targetHex, targetName, null, text, null), targetName, -1));
     }
 
     void sendFiles(String targetHex, String targetName, List<Node.Outgoing> files) {
@@ -478,7 +513,7 @@ public final class FerryApp extends Application implements Node.Host {
                     .setProgress(100, 0, true);
             post(id, b);
             final long[] last = {0};
-            Node.Result r = node.send(targetHex, targetName, files, null, (done, total) -> {
+            Node.Result r = sendAwake(targetHex, targetName, files, null, (done, total) -> {
                 long now = System.currentTimeMillis();
                 if (now - last[0] > 500 && total > 0) {
                     last[0] = now;
