@@ -71,7 +71,7 @@ Double-click **`desktop\install.cmd`**. The script:
 
 ```bash
 sudo apt install mingw-w64 nsis        # Fedora: sudo dnf install mingw64-gcc mingw32-nsis
-cd desktop && ./package-windows.sh     # -> desktop/dist/FerrySetup-0.2.1.exe
+cd desktop && ./package-windows.sh     # -> desktop/dist/FerrySetup-0.2.2.exe
 ```
 
 The installer does the same things as `install.cmd` and adds an uninstaller under Settings → Apps.

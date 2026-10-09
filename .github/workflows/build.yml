@@ -1,7 +1,15 @@
-# Optional: builds both apps on GitHub (push the repo, download artifacts from the Actions tab).
-# Note: CI-built APKs use a throw-away signing key; for updates build locally with android/build.sh.
+# Builds both apps on GitHub on every push (download the artifacts from the Actions tab).
+# Pushing a tag like v0.2.2 also creates a GitHub release with the installable files.
+#
+# APK signing: Android only installs an update over an existing app if both are signed with the
+# same key. Without the two repository secrets below, the APK gets a throw-away key. To use your
+# own key from android/build.sh, add (Settings -> Secrets and variables -> Actions):
+#   FERRY_KEYSTORE_B64   output of: base64 -w0 ~/.config/ferry/android-release.jks
+#   FERRY_KEYSTORE_PASS  content of: ~/.config/ferry/android-release.pass
 name: build
 on: [push, workflow_dispatch]
+permissions:
+  contents: read
 jobs:
   desktop:
     runs-on: ubuntu-latest
@@ -33,6 +41,34 @@ jobs:
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: 17 }
       - run: android/core-test/run.sh
+      - run: python3 tests/core_loopback.py
+      - name: Use the repository's signing key, if it has one
+        env:
+          KEYSTORE_B64: ${{ secrets.FERRY_KEYSTORE_B64 }}
+          KEYSTORE_PASS: ${{ secrets.FERRY_KEYSTORE_PASS }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$KEYSTORE_PASS" ]; then
+            mkdir -p ~/.config/ferry && chmod 700 ~/.config/ferry
+            printf '%s' "$KEYSTORE_B64" | base64 -d > ~/.config/ferry/android-release.jks
+            printf '%s' "$KEYSTORE_PASS" > ~/.config/ferry/android-release.pass
+            chmod 600 ~/.config/ferry/android-release.*
+          fi
       - run: android/build.sh
       - uses: actions/upload-artifact@v4
         with: { name: ferry-apk, path: android/Ferry.apk }
+  release:
+    # Only for version tags, and only when everything above succeeded.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [desktop, windows, windows-installer, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist }
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mv dist/ferry-desktop/ferry dist/ferry-linux-x86_64
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "" \
+            dist/ferry-windows-installer/*.exe dist/ferry-apk/Ferry.apk dist/ferry-linux-x86_64
