@@ -202,7 +202,7 @@ public final class Proto {
 
         public void sendRaw(byte[] plaintext) throws IOException {
             if (plaintext.length > MAX_PLAINTEXT) throw new ProtoException("frame too large");
-            byte[] ct = Crypto.seal(sendKey, nonce(sendCtr++), new byte[0], plaintext);
+            byte[] ct = Aead.seal(sendKey, nonce(sendCtr++), plaintext);
             byte[] frame = new byte[4 + ct.length];
             int n = ct.length;
             frame[0] = (byte) (n >>> 24);
@@ -223,7 +223,7 @@ public final class Proto {
             if (len < 17 || len > MAX_PLAINTEXT + 16) throw new ProtoException("bad frame length");
             byte[] ct = new byte[len];
             in.readFully(ct);
-            byte[] pt = Crypto.open(recvKey, nonce(recvCtr), new byte[0], ct);
+            byte[] pt = Aead.open(recvKey, nonce(recvCtr), ct);
             if (pt == null) throw new ProtoException("authentication failed (wrong key?)");
             recvCtr++;
             return new Msg(pt);

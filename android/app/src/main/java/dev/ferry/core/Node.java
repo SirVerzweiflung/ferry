@@ -246,6 +246,7 @@ public final class Node implements Proto.ServerCtx {
 
     public Node(Host host) {
         this.host = host;
+        Aead.log = host::log;
     }
 
     // ------------------------------------------------------------ pairing window

@@ -83,8 +83,51 @@ public class CoreTest {
         }
         check(xok, "x25519 == JDK XDH (200 random)");
         check(cok, "chacha20-poly1305 == JDK (200 random)");
+        frameCipherTests();
         System.out.println(fails == 0 ? "ALL OK" : fails + " FAILURES");
         System.exit(fails == 0 ? 0 : 1);
+    }
+
+    static void frameCipherTests() {
+        System.out.println("Frame cipher (platform vs built-in)");
+        check(Aead.usingPlatform(), "platform cipher passes the self-test on this JVM");
+        boolean same = true, cross = true, tamper = true;
+        for (int len : new int[] {0, 1, 15, 16, 17, 63, 64, 65, 65536, 1 << 20}) {
+            byte[] k = Crypto.random(32), n = Crypto.random(12), m = Crypto.random(len);
+            Aead.forceInTree = false;
+            byte[] viaPlatform = Aead.seal(k, n, m);
+            Aead.forceInTree = true;
+            byte[] viaBuiltIn = Aead.seal(k, n, m);
+            same &= Arrays.equals(viaPlatform, viaBuiltIn)
+                    && Arrays.equals(viaPlatform, Crypto.seal(k, n, new byte[0], m));
+            cross &= Arrays.equals(Aead.open(k, n, viaPlatform), m); // built-in opens the platform's
+            Aead.forceInTree = false;
+            cross &= Arrays.equals(Aead.open(k, n, viaBuiltIn), m);  // platform opens the built-in's
+            for (int pos : new int[] {0, viaPlatform.length - 1}) {  // first byte and last tag byte
+                byte[] bad = viaPlatform.clone();
+                bad[pos] ^= 1;
+                Aead.forceInTree = false;
+                tamper &= Aead.open(k, n, bad) == null;
+                Aead.forceInTree = true;
+                tamper &= Aead.open(k, n, bad) == null;
+            }
+            Aead.forceInTree = false;
+        }
+        check(same, "platform and built-in produce identical frames (10 sizes)");
+        check(cross, "each opens what the other sealed");
+        check(tamper, "both reject a tampered frame");
+        check(Aead.open(new byte[32], new byte[12], new byte[5]) == null, "too-short frame is rejected");
+        check(Aead.usingPlatform(), "bad frames did not switch the platform cipher off");
+
+        List<String> notes = new ArrayList<>();
+        Aead.log = notes::add;
+        byte[] k = Crypto.random(32), n = Crypto.random(12), m = Crypto.random(1000);
+        Aead.testFailPlatform = true;
+        check(Arrays.equals(Aead.seal(k, n, m), Crypto.seal(k, n, new byte[0], m)),
+                "a failing platform cipher falls back with identical output");
+        check(Arrays.equals(Aead.open(k, n, Aead.seal(k, n, m)), m), "and keeps working afterwards");
+        check(!Aead.usingPlatform() && notes.size() == 1, "the fallback is permanent and logged once: " + notes);
+        Aead.log = null;
     }
 
     // ------------------------------------------------------------ interop "phone"
