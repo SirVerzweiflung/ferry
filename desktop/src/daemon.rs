@@ -839,6 +839,14 @@ fn send_clip_to(st: &State, peer: &Peer, text: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Debug line for the log, e.g. "sent a.jpg: 35.0 MB in 2.1 s (16.7 MB/s; read 0.2 s)".
+fn transfer_line(verb: &str, name: &str, bytes: u64, took: Duration, extra: &str) -> String {
+    let s = took.as_secs_f64();
+    let speed = if s > 0.0 { format!("{:.1} MB/s", bytes as f64 / 1e6 / s) } else { "instant".to_string() };
+    let extra = if extra.is_empty() { String::new() } else { format!("; {}", extra) };
+    format!("{} {}: {} in {:.1} s ({}{})", verb, name, inbox::human(bytes), s, speed, extra)
+}
+
 fn send_file(ch: &mut Channel, p: &Path) -> io::Result<()> {
     let mut f = fs::File::open(p)
         .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("{}: {}", p.display(), e)))?;
@@ -847,16 +855,27 @@ fn send_file(ch: &mut Channel, p: &Path) -> io::Result<()> {
     ch.send(Writer::new(T_FILE).str(&name).u64(size))?;
     let mut buf = vec![0u8; CHUNK];
     let mut left = size;
+    let (started, mut reading) = (Instant::now(), Duration::ZERO);
     while left > 0 {
         let want = (left as usize).min(CHUNK);
+        let t = Instant::now();
         f.read_exact(&mut buf[..want])?;
+        reading += t.elapsed();
         let mut msg = Vec::with_capacity(want + 1);
         msg.push(T_DATA);
         msg.extend_from_slice(&buf[..want]);
         ch.send_raw(msg)?;
         left -= want as u64;
     }
-    ch.wait_ack()
+    ch.wait_ack()?;
+    let took = started.elapsed();
+    let detail = format!(
+        "read {:.1} s, encrypt+network {:.1} s",
+        reading.as_secs_f64(),
+        took.saturating_sub(reading).as_secs_f64()
+    );
+    eprintln!("ferry: {}", transfer_line("sent", &name, size, took, &detail));
+    Ok(())
 }
 
 /// One delivery attempt for a job. Paired devices save files as they arrive, so a
@@ -1029,6 +1048,7 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
 }
 
 fn receive_file(ch: &mut Channel, dir: &Path, name: &str, size: u64) -> io::Result<PathBuf> {
+    let started = Instant::now();
     fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(".{}.ferry-part", name));
     let res = (|| -> io::Result<()> {
@@ -1054,6 +1074,7 @@ fn receive_file(ch: &mut Channel, dir: &Path, name: &str, size: u64) -> io::Resu
     }
     let dest = unique_path(dir, name);
     fs::rename(&tmp, &dest)?;
+    eprintln!("ferry: {}", transfer_line("received", name, size, started.elapsed(), ""));
     Ok(dest)
 }
 
@@ -1576,5 +1597,26 @@ fn tcp_loop(st: Arc<State>, tcp: TcpListener) {
             }
             Err(e) => eprintln!("ferry: accept: {}", e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transfer_line_format() {
+        assert_eq!(
+            transfer_line("sent", "a.jpg", 35_000_000, Duration::from_millis(2100), ""),
+            "sent a.jpg: 35.0 MB in 2.1 s (16.7 MB/s)"
+        );
+        assert_eq!(
+            transfer_line("sent", "a.jpg", 35_000_000, Duration::from_millis(2100), "read 0.2 s"),
+            "sent a.jpg: 35.0 MB in 2.1 s (16.7 MB/s; read 0.2 s)"
+        );
+        assert_eq!(
+            transfer_line("received", "empty", 0, Duration::ZERO, ""),
+            "received empty: 0 B in 0.0 s (instant)"
+        );
     }
 }
