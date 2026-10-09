@@ -128,6 +128,14 @@ public class CoreTest {
         check(Arrays.equals(Aead.open(k, n, Aead.seal(k, n, m)), m), "and keeps working afterwards");
         check(!Aead.usingPlatform() && notes.size() == 1, "the fallback is permanent and logged once: " + notes);
         Aead.log = null;
+
+        System.out.println("Log line");
+        check(Node.transferLine("sent", "a.jpg", 35_000_000L, 2_100_000_000L, null)
+                .equals("sent a.jpg: 35.0 MB in 2.1 s (16.7 MB/s)"), "transfer line");
+        check(Node.transferLine("sent", "a.jpg", 35_000_000L, 2_100_000_000L, "read 0.2 s")
+                .equals("sent a.jpg: 35.0 MB in 2.1 s (16.7 MB/s; read 0.2 s)"), "transfer line with details");
+        check(Node.transferLine("received", "empty", 0, 0, null)
+                .equals("received empty: 0 B in 0.0 s (instant)"), "transfer line for an empty file in no time");
     }
 
     // ------------------------------------------------------------ interop "phone"

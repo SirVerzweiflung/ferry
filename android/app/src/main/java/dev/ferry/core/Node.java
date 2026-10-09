@@ -354,10 +354,13 @@ public final class Node implements Proto.ServerCtx {
                     Proto.Reader r = m.reader();
                     String name = r.str();
                     long size = r.u64();
-                    Incoming inc = host.beginFile(peer, sanitize(name), size);
+                    String clean = sanitize(name);
+                    long t0 = System.nanoTime();
+                    Incoming inc = host.beginFile(peer, clean, size);
                     try {
                         receiveInto(ch, inc.stream(), size);
                         inc.commit();
+                        host.log(transferLine("received", clean, size, System.nanoTime() - t0, null));
                     } catch (IOException ex) {
                         inc.abort();
                         try {
@@ -417,8 +420,10 @@ public final class Node implements Proto.ServerCtx {
                         ch.ack(false, "more than offered");
                         throw new Proto.ProtoException("guest sent more than offered");
                     }
+                    long t0 = System.nanoTime();
                     receiveInto(ch, t.file(fname, size), size);
                     t.fileDone();
+                    host.log(transferLine("received", fname, size, System.nanoTime() - t0, null));
                     files++;
                     ch.ack(true, "");
                 } else if (m.type == Proto.T_CLIP) {
@@ -471,6 +476,14 @@ public final class Node implements Proto.ServerCtx {
         if (b >= 1_000_000L) return String.format(java.util.Locale.ROOT, "%.1f MB", b / 1e6);
         if (b >= 1_000L) return String.format(java.util.Locale.ROOT, "%.0f KB", b / 1e3);
         return b + " B";
+    }
+
+    /** Debug line for the log, e.g. "sent a.jpg: 35.0 MB in 2.1 s (16.7 MB/s; read 0.2 s)". */
+    public static String transferLine(String verb, String name, long bytes, long nanos, String extra) {
+        double s = nanos / 1e9;
+        String speed = s > 0 ? String.format(java.util.Locale.ROOT, "%.1f MB/s", bytes / 1e6 / s) : "instant";
+        return String.format(java.util.Locale.ROOT, "%s %s: %s in %.1f s (%s%s)", verb, name, human(bytes), s,
+                speed, extra == null ? "" : "; " + extra);
     }
 
     // ------------------------------------------------------------ UDP: discovery + presence
@@ -812,20 +825,23 @@ public final class Node implements Proto.ServerCtx {
         t.start();
     }
 
-    private static void sendFile(Proto.Channel ch, Outgoing o, long[] done, long total, Progress prog)
+    private void sendFile(Proto.Channel ch, Outgoing o, long[] done, long total, Progress prog)
             throws IOException {
         byte[] buf = new byte[Proto.CHUNK + 1];
+        long t0 = System.nanoTime(), readNanos = 0, seal0 = ch.sealNanos, write0 = ch.writeNanos;
         ch.send(new Proto.Writer(Proto.T_FILE).str(o.name).u64(o.size));
         long left = o.size;
         try (InputStream in = o.source.open()) {
             while (left > 0) {
                 int want = (int) Math.min(left, Proto.CHUNK);
                 int off = 0;
+                long r0 = System.nanoTime();
                 while (off < want) {
                     int n = in.read(buf, 1 + off, want - off);
                     if (n < 0) throw new FileNotFoundException(o.name + " is shorter than expected");
                     off += n;
                 }
+                readNanos += System.nanoTime() - r0;
                 buf[0] = Proto.T_DATA;
                 ch.sendRaw(Arrays.copyOf(buf, want + 1));
                 left -= want;
@@ -834,6 +850,9 @@ public final class Node implements Proto.ServerCtx {
             }
         }
         ch.waitAck();
+        host.log(transferLine("sent", o.name, o.size, System.nanoTime() - t0, String.format(java.util.Locale.ROOT,
+                "read %.1f s, encrypt %.1f s, network %.1f s%s", readNanos / 1e9, (ch.sealNanos - seal0) / 1e9,
+                (ch.writeNanos - write0) / 1e9, Aead.usingPlatform() ? "" : ", built-in cipher")));
     }
 
     /** One delivery attempt. Throws Unreachable (retry) or another IOException (refused). */

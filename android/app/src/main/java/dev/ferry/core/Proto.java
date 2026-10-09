@@ -185,6 +185,8 @@ public final class Proto {
         private final OutputStream out;
         private final byte[] sendKey, recvKey;
         private long sendCtr, recvCtr;
+        /** Running totals for the debug log: time spent encrypting and writing to the socket. */
+        public long sealNanos, writeNanos;
 
         Channel(Socket s, DataInputStream in, OutputStream out, byte[] sendKey, byte[] recvKey) {
             this.socket = s;
@@ -202,7 +204,9 @@ public final class Proto {
 
         public void sendRaw(byte[] plaintext) throws IOException {
             if (plaintext.length > MAX_PLAINTEXT) throw new ProtoException("frame too large");
+            long t0 = System.nanoTime();
             byte[] ct = Aead.seal(sendKey, nonce(sendCtr++), plaintext);
+            long t1 = System.nanoTime();
             byte[] frame = new byte[4 + ct.length];
             int n = ct.length;
             frame[0] = (byte) (n >>> 24);
@@ -212,6 +216,8 @@ public final class Proto {
             System.arraycopy(ct, 0, frame, 4, ct.length);
             out.write(frame);
             out.flush();
+            sealNanos += t1 - t0;
+            writeNanos += System.nanoTime() - t1;
         }
 
         public void send(Writer w) throws IOException {
