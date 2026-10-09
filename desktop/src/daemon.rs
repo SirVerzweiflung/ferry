@@ -874,7 +874,7 @@ fn send_file(ch: &mut Channel, p: &Path) -> io::Result<()> {
         reading.as_secs_f64(),
         took.saturating_sub(reading).as_secs_f64()
     );
-    eprintln!("ferry: {}", transfer_line("sent", &name, size, took, &detail));
+    let _ = writeln!(io::stderr(), "ferry: {}", transfer_line("sent", &name, size, took, &detail));
     Ok(())
 }
 
@@ -1074,7 +1074,7 @@ fn receive_file(ch: &mut Channel, dir: &Path, name: &str, size: u64) -> io::Resu
     }
     let dest = unique_path(dir, name);
     fs::rename(&tmp, &dest)?;
-    eprintln!("ferry: {}", transfer_line("received", name, size, started.elapsed(), ""));
+    let _ = writeln!(io::stderr(), "ferry: {}", transfer_line("received", name, size, started.elapsed(), ""));
     Ok(dest)
 }
 

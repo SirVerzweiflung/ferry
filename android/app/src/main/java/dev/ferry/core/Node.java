@@ -360,7 +360,7 @@ public final class Node implements Proto.ServerCtx {
                     try {
                         receiveInto(ch, inc.stream(), size);
                         inc.commit();
-                        host.log(transferLine("received", clean, size, System.nanoTime() - t0, null));
+                        debug(transferLine("received", clean, size, System.nanoTime() - t0, null));
                     } catch (IOException ex) {
                         inc.abort();
                         try {
@@ -423,7 +423,7 @@ public final class Node implements Proto.ServerCtx {
                     long t0 = System.nanoTime();
                     receiveInto(ch, t.file(fname, size), size);
                     t.fileDone();
-                    host.log(transferLine("received", fname, size, System.nanoTime() - t0, null));
+                    debug(transferLine("received", fname, size, System.nanoTime() - t0, null));
                     files++;
                     ch.ack(true, "");
                 } else if (m.type == Proto.T_CLIP) {
@@ -476,6 +476,14 @@ public final class Node implements Proto.ServerCtx {
         if (b >= 1_000_000L) return String.format(java.util.Locale.ROOT, "%.1f MB", b / 1e6);
         if (b >= 1_000L) return String.format(java.util.Locale.ROOT, "%.0f KB", b / 1e3);
         return b + " B";
+    }
+
+    /** Debug logging must never disturb a transfer. */
+    private void debug(String line) {
+        try {
+            host.log(line);
+        } catch (RuntimeException ignored) {
+        }
     }
 
     /** Debug line for the log, e.g. "sent a.jpg: 35.0 MB in 2.1 s (16.7 MB/s; read 0.2 s)". */
@@ -850,7 +858,7 @@ public final class Node implements Proto.ServerCtx {
             }
         }
         ch.waitAck();
-        host.log(transferLine("sent", o.name, o.size, System.nanoTime() - t0, String.format(java.util.Locale.ROOT,
+        debug(transferLine("sent", o.name, o.size, System.nanoTime() - t0, String.format(java.util.Locale.ROOT,
                 "read %.1f s, encrypt %.1f s, network %.1f s%s", readNanos / 1e9, (ch.sealNanos - seal0) / 1e9,
                 (ch.writeNanos - write0) / 1e9, Aead.usingPlatform() ? "" : ", built-in cipher")));
     }

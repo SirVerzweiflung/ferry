@@ -89,8 +89,12 @@ public final class FerryApp extends Application implements Node.Host {
         node = new Node(this);
         inbox = new Inbox(new File(getFilesDir(), "incoming"));
         nm = getSystemService(NotificationManager.class);
-        sendWake = getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ferry:send");
-        sendWifi = getSystemService(WifiManager.class).createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "ferry:send");
+        try { // optional: without them sends still work, only possibly slower
+            sendWake = getSystemService(PowerManager.class).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ferry:send");
+            sendWifi = getSystemService(WifiManager.class).createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "ferry:send");
+        } catch (RuntimeException e) {
+            log("send locks unavailable: " + e);
+        }
         NotificationChannel svc = new NotificationChannel(CH_SERVICE, "Background service",
                 NotificationManager.IMPORTANCE_MIN);
         svc.setDescription("Shown while Ferry waits for files from your computers. You can hide it.");
@@ -477,10 +481,14 @@ public final class FerryApp extends Application implements Node.Host {
         boolean wake = false, wifi = false;
         try {
             try {
-                sendWake.acquire(30 * 60 * 1000L);
-                wake = true;
-                sendWifi.acquire();
-                wifi = true;
+                if (sendWake != null) {
+                    sendWake.acquire(30 * 60 * 1000L);
+                    wake = true;
+                }
+                if (sendWifi != null) {
+                    sendWifi.acquire();
+                    wifi = true;
+                }
             } catch (RuntimeException e) {
                 log("send locks: " + e);
             }

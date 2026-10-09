@@ -41,7 +41,7 @@ public final class Aead {
         if (usingPlatform()) {
             try {
                 return platform(name, Cipher.ENCRYPT_MODE, key, nonce, NO_AAD, pt);
-            } catch (GeneralSecurityException | RuntimeException e) {
+            } catch (GeneralSecurityException | RuntimeException | LinkageError e) {
                 disable(name + ": " + e);
             }
         }
@@ -56,7 +56,7 @@ public final class Aead {
                 return platform(name, Cipher.DECRYPT_MODE, key, nonce, NO_AAD, ct);
             } catch (AEADBadTagException e) {
                 return null;
-            } catch (GeneralSecurityException | RuntimeException e) {
+            } catch (GeneralSecurityException | RuntimeException | LinkageError e) {
                 disable(name + ": " + e);
             }
         }
@@ -79,7 +79,7 @@ public final class Aead {
                     why = n + " does not match the built-in cipher";
                 } catch (java.security.NoSuchAlgorithmException e) {
                     // try the next name
-                } catch (GeneralSecurityException | RuntimeException e) {
+                } catch (GeneralSecurityException | RuntimeException | LinkageError e) {
                     why = n + ": " + e;
                 }
             }
@@ -100,7 +100,7 @@ public final class Aead {
             throws GeneralSecurityException {
         if (testFailPlatform) {
             testFailPlatform = false;
-            throw new GeneralSecurityException("simulated failure");
+            throw new LinkageError("simulated failure");
         }
         Cipher c = Cipher.getInstance(n);
         c.init(op, new SecretKeySpec(key, "ChaCha20"), new IvParameterSpec(nonce));
