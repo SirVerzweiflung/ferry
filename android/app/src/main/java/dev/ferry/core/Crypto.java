@@ -229,18 +229,7 @@ public final class Crypto {
         b[o + 3] = (byte) (v >>> 24);
     }
 
-    private static void block(int[] key, int counter, int[] nonce, byte[] out) {
-        int[] s = new int[16];
-        s[0] = 0x61707865;
-        s[1] = 0x3320646e;
-        s[2] = 0x79622d32;
-        s[3] = 0x6b206574;
-        System.arraycopy(key, 0, s, 4, 8);
-        s[12] = counter;
-        s[13] = nonce[0];
-        s[14] = nonce[1];
-        s[15] = nonce[2];
-        int[] w = s.clone();
+    private static void rounds(int[] w) {
         for (int i = 0; i < 10; i++) {
             qr(w, 0, 4, 8, 12);
             qr(w, 1, 5, 9, 13);
@@ -251,6 +240,25 @@ public final class Crypto {
             qr(w, 2, 7, 8, 13);
             qr(w, 3, 4, 9, 14);
         }
+    }
+
+    private static void initState(int[] s, int[] key, int[] nonce) {
+        s[0] = 0x61707865;
+        s[1] = 0x3320646e;
+        s[2] = 0x79622d32;
+        s[3] = 0x6b206574;
+        System.arraycopy(key, 0, s, 4, 8);
+        s[13] = nonce[0];
+        s[14] = nonce[1];
+        s[15] = nonce[2];
+    }
+
+    private static void block(int[] key, int counter, int[] nonce, byte[] out) {
+        int[] s = new int[16];
+        initState(s, key, nonce);
+        s[12] = counter;
+        int[] w = s.clone();
+        rounds(w);
         for (int i = 0; i < 16; i++) put32(out, 4 * i, w[i] + s[i]);
     }
 
@@ -272,13 +280,24 @@ public final class Crypto {
     }
 
     public static void chacha20Xor(byte[] key, int counter, byte[] nonce, byte[] data, int off, int len) {
-        int[] k = words(key, 8);
-        int[] n = words(nonce, 3);
-        byte[] ks = new byte[64];
+        int[] s = new int[16], w = new int[16];
+        initState(s, words(key, 8), words(nonce, 3));
         for (int p = 0; p < len; p += 64) {
-            block(k, counter++, n, ks);
-            int m = Math.min(64, len - p);
-            for (int i = 0; i < m; i++) data[off + p + i] ^= ks[i];
+            s[12] = counter++;
+            System.arraycopy(s, 0, w, 0, 16);
+            rounds(w);
+            int o = off + p, m = Math.min(64, len - p);
+            if (m == 64) {
+                for (int i = 0; i < 16; i++) {
+                    int v = w[i] + s[i], q = o + 4 * i;
+                    data[q] ^= (byte) v;
+                    data[q + 1] ^= (byte) (v >>> 8);
+                    data[q + 2] ^= (byte) (v >>> 16);
+                    data[q + 3] ^= (byte) (v >>> 24);
+                }
+            } else {
+                for (int i = 0; i < m; i++) data[o + i] ^= (byte) ((w[i >>> 2] + s[i >>> 2]) >>> (8 * (i & 3)));
+            }
         }
     }
 
